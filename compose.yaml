@@ -38,7 +38,7 @@ services:
     restart: always
     # The pool size, declared so that a bare `docker compose up -d` converges
     # to it. Compose honours this outside swarm, and an explicit
-    # `--scale runner=N` still wins -- which is what runner/Jenkinsfile passes
+    # `--scale runner=N` still wins -- which is what the Jenkinsfile passes
     # from RUNNER_COUNT. Without a default here, a plain `up -d` silently
     # stops every container past the first, and the jobs they were serving
     # start queueing behind each other for no visible reason.
@@ -104,7 +104,7 @@ secrets:
     # every restart -- and these containers restart constantly by design,
     # one per job. So the file has to outlive whatever created it.
     #
-    # That matters for the Jenkins job (runner/Jenkinsfile): a Jenkins
+    # That matters for the Jenkins job (Jenkinsfile): a Jenkins
     # workspace is not a durable location, so the job writes the PAT to a
     # persistent path and points RUNNER_PAT_FILE at it. Deleting the file
     # after `compose up` would leave the pool working right up until the

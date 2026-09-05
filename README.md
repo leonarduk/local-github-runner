@@ -14,9 +14,19 @@ It began inside one repo, as a fix for that repo's dead CI, and was pointed at f
 
 ## ⚠️ Private repositories only
 
-**Never point this at a public repository.** On a public repo, anyone can open a pull request, and a workflow triggered by that PR runs *their* code on *your* machine. GitHub's own documentation is unusually blunt about this, and the container boundary here is not a security boundary — jobs get passwordless `sudo` inside the container (see below).
+**Never point this at a public repository.** On a public repo, anyone can open a pull request, and a workflow triggered by that PR runs *their* code on *your* machine. (GitHub defaults public repos to requiring approval for a first-time contributor, so it is not quite a drive-by -- but that bar is one trivial merged PR high, and it is a setting that can drift.) GitHub's own documentation is unusually blunt about this, and the container boundary here is not a security boundary — jobs get passwordless `sudo` inside the container (see below).
 
 Point it only at repos where you control who can trigger a run. If one is ever made public, tear its pool down first.
+
+The sharpest consequence is the PAT. `entrypoint.sh` needs a token that can mint a
+registration token -- a classic PAT with `repo`, which reaches **every repository on
+the account** -- and Compose keeps it mounted at `/run/secrets/github_pat` for the
+container's whole life, not only during registration. Jobs run with passwordless
+`sudo`, so any job can read it. GitHub's fork protections do not cover this: they
+withhold *workflow secrets* from fork pull requests and make `GITHUB_TOKEN`
+read-only, but this PAT is a file on the runner, not a workflow secret. Prefer a
+fine-grained PAT limited to the single target repository, which bounds what a
+leaked token can reach.
 
 Two things reduce the blast radius even so:
 
