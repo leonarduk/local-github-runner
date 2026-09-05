@@ -126,13 +126,14 @@ Bumping the runner version means editing `RUNNER_VERSION` **and** the two checks
 docker compose down
 ```
 
-In principle each container deregisters itself on the way out. In practice it does not — see **Shutdown does not deregister** below — so expect to clear strays under Settings → Actions → Runners, or with `gh api -X DELETE repos/OWNER/REPO/actions/runners/ID`.
+Each container deregisters itself on the way out, so nothing should be left behind — a `compose down` of a two-runner pool completes in about five seconds with both registrations gone.
+
+That relies on `entrypoint.sh` signalling `Runner.Listener` directly rather than only `run.sh`: a signal to the wrapper alone never reaches the process `RUNNER_MANUALLY_TRAP_SIG=1` arms, and the container is then SIGKILLed with `deregister()` unreached. If a container is killed outright anyway — `docker kill`, a host crash — its runner lingers as "offline" under Settings → Actions → Runners and needs removing there, or with `gh api -X DELETE repos/OWNER/REPO/actions/runners/ID`. The container itself recovers unaided: the leftover `.runner` from its previous life is cleared at start-up before it reconfigures.
 
 ## Known limits
 
 - **No Docker-in-Docker.** No job here needs it. Adding it means mounting the host's Docker socket, which hands any job root on the host — do not do that on the strength of this README alone.
 - **`actions/cache` has no backing store**, so cache steps are no-ops that cost a little time. Fine for this repo; worth knowing if a workflow starts depending on a warm cache.
 - **`pip install` only works after `actions/setup-python`.** The base is Ubuntu 24.04, whose system interpreter refuses installs under PEP 668 (`externally-managed-environment`). `setup-python` puts its own interpreter on PATH first, so `ci.yml` is fine — but a workflow that drops that step keeps working on a GitHub-hosted runner and fails here.
-- **Shutdown does not deregister.** A plain `docker stop`, or any `compose up -d` that recreates a running container, leaves a runner registered but `offline` with nothing behind it — and the SIGKILLed container is then restarted by `restart: always` with `.runner` and `.credentials` still on its disk, so it crash-loops on `Cannot configure the runner because it is already configured`. The cause is in `entrypoint.sh`: it sends SIGTERM to `run.sh`, but `RUNNER_MANUALLY_TRAP_SIG=1` is read by the `Runner.Listener` process underneath, which never sees the signal, so `deregister()` is never reached. Measured 2026-09-05: a `docker stop -t 60` waited the full 60s and was still killed. Recover with `docker compose up -d --force-recreate`, which builds genuinely fresh containers. `stop_grace_period: 60s` is set in `compose.yaml` ready for the fix, but does not help by itself.
 - **`mem_limit: 2g` / `pids_limit: 512`** are conservative. If a build is OOM-killed, raise them rather than removing them.
 - The container is `linux/amd64` on this host. A workflow pinned to `windows-*` or `macos-*` will never match it.

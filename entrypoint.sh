@@ -83,8 +83,35 @@ forward_signal() {
         log "forwarding termination to run.sh (pid ${RUNNER_PID})"
         kill -TERM "${RUNNER_PID}" 2>/dev/null || true
     fi
+    # run.sh is only a wrapper. The process that RUNNER_MANUALLY_TRAP_SIG=1
+    # arms is the Runner.Listener underneath it, and a signal sent to the
+    # wrapper never reaches it -- so the listener keeps running, the `wait`
+    # below never returns, and the container is SIGKILLed with deregister()
+    # unreached. That is what left runners registered-but-offline with no
+    # container behind them, and left this container's own .runner on disk
+    # for `restart: always` to trip over. Measured before this: `docker stop
+    # -t 60` waited the full 60s and was killed anyway.
+    if pkill -TERM -f 'Runner\.Listener' 2>/dev/null; then
+        log "forwarding termination to Runner.Listener"
+    fi
 }
 trap forward_signal INT TERM
+
+# A container that was killed rather than stopped -- SIGKILL after the grace
+# period, `docker kill`, a host crash -- leaves .runner and .credentials
+# behind. `restart: always` then restarts *that same container*, and config.sh
+# refuses with "Cannot configure the runner because it is already configured",
+# so it crash-loops instead of rejoining the pool. Clear the leftovers and
+# register afresh; the name is regenerated per process, so this comes back as
+# a new runner rather than fighting the old registration.
+if [[ -f .runner ]]; then
+    log "found a stale runner configuration from a killed container; clearing it"
+    if stale_removal="$(api remove-token 2>/dev/null)"; then
+        ./config.sh remove --token "$(jq -r '.token // empty' <<< "${stale_removal}")" \
+            || log "config.sh remove failed; deleting the local configuration by hand"
+    fi
+    rm -f .runner .credentials .credentials_rsaparams
+fi
 
 # --- configure ----------------------------------------------------------
 #
@@ -96,6 +123,7 @@ trap forward_signal INT TERM
 # --disableupdate keeps the version pinned in the Dockerfile honest. Drop it
 # if GitHub starts refusing jobs from a version this old; the runner will
 # then self-update in place, and the image should be rebuilt to match.
+
 log "configuring ${RUNNER_NAME}"
 ./config.sh \
     --unattended \
