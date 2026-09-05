@@ -95,7 +95,7 @@ services:
     #
     # A job gets no more of the host than it needs. Raise these if a build
     # starts being OOM-killed, rather than removing them outright.
-    mem_limit: 2g
+    mem_limit: 1g
     pids_limit: 512
 
 secrets:
