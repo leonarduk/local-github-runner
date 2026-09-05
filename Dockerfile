@@ -75,7 +75,17 @@ RUN useradd --create-home --shell /bin/bash runner \
  && echo 'runner ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/runner \
  && chmod 0440 /etc/sudoers.d/runner \
  && mkdir -p "${RUNNER_TOOL_CACHE}" /home/runner/actions-runner \
- && chown -R runner:runner "${RUNNER_TOOL_CACHE}" /home/runner
+ && chown -R runner:runner "${RUNNER_TOOL_CACHE}" /home/runner \
+ # GitHub-hosted runners let the runner user write to /usr/local/bin
+ # without sudo -- it is how `download-actionlint.bash ... /usr/local/bin`
+ # and similar job-time tool installs work there un-sudoed. This image
+ # did not, which is why that class of step kept failing here with
+ # "Permission denied" even with passwordless sudo already available:
+ # workflows copied from a GitHub-hosted runner do not think to add
+ # `sudo`. chown alone is enough -- the directory's existing 0755 already
+ # grants the owner write, and root's own installs elsewhere in this
+ # file are unaffected since root can write here regardless of owner.
+ && chown runner:runner /usr/local/bin
 
 WORKDIR /home/runner/actions-runner
 
@@ -129,6 +139,35 @@ RUN set -eux; \
     install -m 0755 "${dir}/bin/gh" /usr/local/bin/gh; \
     rm -rf gh.tar.gz "${dir}"; \
     gh --version
+
+# Maven. A JDK itself is not baked in -- it comes from actions/setup-java at
+# job time, into the writable RUNNER_TOOL_CACHE, the same as
+# actions/setup-python supplies Python interpreters. But setup-java installs
+# a JDK, not Maven: GitHub-hosted runners ship Maven separately, pre-installed
+# alongside the JDK toolchain, so a workflow that never calls out to install
+# it fails here exactly like the gh gap above -- `mvn: command not found`.
+#
+# The distribution is a pure-Java tarball, identical on every architecture,
+# so there is one checksum rather than one per arch. It cannot be sanity
+# checked by running `mvn -version` in this layer the way `gh --version`
+# checks the CLI above: mvn is a wrapper script that execs java, and no JDK
+# exists in the image at build time. Checking the extracted script is
+# executable is the closest available substitute.
+#
+# SHA512 comes from the .sha512 file alongside the release at
+# https://dlcdn.apache.org/maven/maven-3/. Bump both together.
+ARG MAVEN_VERSION=3.9.16
+ARG MAVEN_SHA512=831a8591fe20c8243b1dbe7d71e3244f31d1665b0804b2e825e38cbbe5ce0cafb8338851f90780735568773e0a6cd07bbec107cda0b896b008b861075358b6f6
+
+RUN set -eux;\
+    cd /tmp;\
+    url="https://dlcdn.apache.org/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz";\
+    curl -fsSL --retry 5 --retry-delay 5 -o maven.tar.gz "${url}";\
+    echo "${MAVEN_SHA512}  maven.tar.gz" | sha512sum -c -;\
+    tar xzf maven.tar.gz -C /opt;\
+    rm maven.tar.gz;\
+    ln -s "/opt/apache-maven-${MAVEN_VERSION}/bin/mvn" /usr/local/bin/mvn;\
+    test -x "/opt/apache-maven-${MAVEN_VERSION}/bin/mvn"
 
 COPY --chown=runner:runner entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
