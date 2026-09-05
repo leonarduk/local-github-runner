@@ -65,8 +65,11 @@ the runner's heartbeat, and GitHub cancels the job server-side. The signature is
 unmistakable once you know it, and it shows up two different ways depending on
 whether a job had been claimed yet when the host went under.
 
-**A job already running** dies at almost exactly the sleep timeout, because
-GitHub stops hearing its heartbeat and closes it out server-side. The tell is
+**A job already running** dies about ten minutes after the host goes under —
+that interval is GitHub's own patience with a runner that has stopped
+answering, not any timeout on your machine, so it is the same ten minutes
+whatever sent the host to sleep. Do not read it as pointing at a ten-minute
+power setting; that coincidence cost us an afternoon here. The tell is
 that its logs keep going *past its own recorded completion*: the container had
 the step suspended, not finished, and uploads the rest on wake into a job record
 that is already closed. One observed here completed at `13:42:49Z` with log
@@ -82,16 +85,42 @@ the machine was absent. This one is easy to misread as contention, which is what
 makes the wake timestamp worth checking: jobs across *different repositories*
 resuming within the same few seconds is one host waking, not several flakes.
 
-Either way it is intermittent — jobs shorter than the timeout finish fine — so
+Either way it is intermittent — jobs shorter than the outage finish fine — so
 it reads as a flaky test suite rather than a host problem.
 
-Check the timeout, then disable it while the machine is serving runners:
+There are two separate ways a host goes under, and fixing one does nothing
+about the other. On Windows both are recorded: Kernel-Power event 42 carries a
+reason, where **7 is an idle timeout** and **0 is the lid or the power button**.
+Check which you actually have before fixing anything.
 
 ```powershell
-# Windows -- STANDBYIDLE's AC index is the timeout in seconds (0x258 = 10 min)
+# Which kind of sleep, and when -- reason 7 = idle, reason 0 = lid/button
+Get-WinEvent -FilterHashtable @{LogName='System';
+  ProviderName='Microsoft-Windows-Kernel-Power'; Id=42} |
+  ForEach-Object { '{0:u} reason={1}' -f $_.TimeCreated, $_.Properties[2].Value }
+
+# Idle timeout: STANDBYIDLE's AC index, in seconds
 powercfg /query SCHEME_CURRENT SUB_SLEEP
 powercfg /change standby-timeout-ac 0
 ```
+
+Closing the lid is the one that catches people, because a laptop on a desk gets
+shut without anyone thinking of it as powering the machine down, and no idle
+timeout protects against it. Worse, the setting that governs it is hidden from
+the Power Options UI on some machines, so it cannot be found by clicking
+through Windows settings — it has to be set by GUID, elevated:
+
+```powershell
+# Lid close -> do nothing, on AC. SUB_BUTTONS / LIDACTION.
+powercfg /setacvalueindex SCHEME_CURRENT `
+  4f971e89-eebd-4455-a8de-9e59040e7347 5ca83367-6e45-459f-a27b-476b1d01c936 0
+powercfg /setactive SCHEME_CURRENT
+```
+
+That binds to the **active power scheme only**, so switching schemes silently
+reverts it. And a closed lid under sustained build load is a real thermal
+question on a laptop — pair it with the machine being docked and ventilated
+rather than setting it blind.
 
 ```bash
 # macOS
