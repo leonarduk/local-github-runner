@@ -2,3 +2,4 @@ pat.secret
 *.secret
 .env
 _work/
+pools.conf

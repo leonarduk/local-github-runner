@@ -1,0 +1,14 @@
+# The pools this host runs. One line per pool: name, owner/repo, count.
+# Read by startRunners.sh and stopRunners.sh -- "all of them" means every
+# line in here, so a host serving fewer repos just has fewer lines.
+#
+#   cp pools.conf.example pools.conf   # gitignored, edit freely
+#
+# <name> becomes the compose project gh-runner-<name>; it does not have to
+# match the repo. <count> is how many containers ./pools.sh scales to.
+
+jobtrack             leonarduk/jobtrack                                    3
+issue-worm-pro       leonarduk/issue-worm-pro                              4
+java21               leonarduk/java21-udemy-practice-tests                 2
+spring-boot-ai       leonarduk/spring-boot-ai-udemy-practice-tests         2
+spring-professional  leonarduk/spring-professional-udemy-practice-tests    2
