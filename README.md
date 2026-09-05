@@ -62,11 +62,28 @@ Count the containers, not the pools.
 
 **Sleep. This one silently cancels jobs.** A host that suspends mid-job stops
 the runner's heartbeat, and GitHub cancels the job server-side. The signature is
-unmistakable once you know it: the job dies at almost exactly your sleep
-timeout, and the log timestamps *inside* it span far longer than the job's
-recorded duration, because the clock jumps on resume. It is intermittent — jobs
-shorter than the timeout finish fine — so it reads as a flaky test suite rather
-than a host problem.
+unmistakable once you know it, and it shows up two different ways depending on
+whether a job had been claimed yet when the host went under.
+
+**A job already running** dies at almost exactly the sleep timeout, because
+GitHub stops hearing its heartbeat and closes it out server-side. The tell is
+that its logs keep going *past its own recorded completion*: the container had
+the step suspended, not finished, and uploads the rest on wake into a job record
+that is already closed. One observed here completed at `13:42:49Z` with log
+lines running to `14:47:09Z` — 64 minutes after it supposedly ended. A job that
+finished before its own logs were written is not a race condition; it is a
+sleeping host, and it is a cheap thing to grep for.
+
+**A job still queued** simply is not claimed, because no runner is awake to take
+it. It then starts at the moment of wake and runs at completely normal speed —
+in the same incident, a run queued at `13:32:45Z` started its jobs at
+`14:47:26Z` and finished them in 8 to 109 seconds, all green. Nothing was slow;
+the machine was absent. This one is easy to misread as contention, which is what
+makes the wake timestamp worth checking: jobs across *different repositories*
+resuming within the same few seconds is one host waking, not several flakes.
+
+Either way it is intermittent — jobs shorter than the timeout finish fine — so
+it reads as a flaky test suite rather than a host problem.
 
 Check the timeout, then disable it while the machine is serving runners:
 
