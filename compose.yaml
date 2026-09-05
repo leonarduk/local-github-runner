@@ -53,12 +53,12 @@ services:
     # which starts only once run.sh has wound down and then costs two GitHub
     # round-trips (mint a removal token, then `config.sh remove`).
     #
-    # Necessary but NOT sufficient on its own: SIGTERM currently reaches
-    # run.sh and never the Runner.Listener process that
-    # RUNNER_MANUALLY_TRAP_SIG=1 arms, so the runner never exits and the
-    # container is SIGKILLed whatever this is set to -- measured at a full 60s
-    # on 2026-09-05. See "Shutdown does not deregister" in README.md. This
-    # only starts paying off once that signalling is fixed.
+    # This is necessary but was not sufficient on its own. SIGTERM reaches
+    # run.sh, which is only a wrapper, and never the Runner.Listener that
+    # RUNNER_MANUALLY_TRAP_SIG=1 arms -- so the runner did not exit and the
+    # container was SIGKILLed whatever this was set to, measured at a full
+    # 60s. entrypoint.sh now signals the listener directly as well, so the
+    # grace period is what gives deregistration room to finish.
     stop_grace_period: 60s
     environment:
       # Overridable from a .env file beside this one, so the same compose

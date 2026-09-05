@@ -12,6 +12,24 @@ The jobs never start, so a red CI says nothing about the code. Self-hosted runne
 
 It began inside one repo, as a fix for that repo's dead CI, and was pointed at four more within a day. It lives here because a tool that serves five repositories should not be a subdirectory of the first one that needed it.
 
+## What this is not
+
+A single-host tool, deliberately. It is a Dockerfile and a compose file that
+keep a handful of ephemeral runners alive on one machine, and the interesting
+part is not the container -- it is the collection of failure modes documented
+here, most of which cost somebody an afternoon to find.
+
+If you need something else, use something else:
+
+- **Kubernetes, autoscaling, or more than one team** ->
+  [actions-runner-controller](https://github.com/actions/actions-runner-controller),
+  which is the supported answer and does all of that properly.
+- **A public repository** -> nothing here, and see the next section. This is
+  not a limitation to work around; it is the one hard rule.
+- **Windows or macOS jobs** -> these runners are Linux containers only.
+- **Jobs needing `container:`, `services:`, or Docker-based actions** -> those
+  need Docker-in-Docker, which this deliberately does not provide.
+
 ## ⚠️ Private repositories only
 
 **Never point this at a public repository.** On a public repo, anyone can open a pull request, and a workflow triggered by that PR runs *their* code on *your* machine. (GitHub defaults public repos to requiring approval for a first-time contributor, so it is not quite a drive-by -- but that bar is one trivial merged PR high, and it is a setting that can drift.) GitHub's own documentation is unusually blunt about this, and the container boundary here is not a security boundary — jobs get passwordless `sudo` inside the container (see below).
@@ -229,7 +247,20 @@ Two deliberate choices worth knowing about, because both look like oversights:
 
 ## Managing a pool from Jenkins
 
+> **Unverified.** This pipeline has never been run end to end. Every pool
+> described in this README was created by hand with `docker compose`, and the
+> commands in the rest of this file are the tested path. Treat the Jenkinsfile
+> as a sketch to read rather than something known to work, and expect to debug
+> it the first time. It is kept because the shape is right, not because it has
+> earned its place.
+
 `Jenkinsfile` is a parameterised pipeline that builds the image and keeps one pool at the requested size. It runs on `agent any`, so it provisions runners on whichever node Jenkins itself runs on.
+
+You very probably do not need it. For one host it wraps two environment
+variables and a `docker compose up`, while adding a stateful service that holds
+the Docker socket -- root on the host -- to do so. It starts earning its keep
+with a second machine, or when the PAT should live in a credential store rather
+than a file, or when you want the pool re-converged on a schedule.
 
 **One-time setup on the Jenkins instance:**
 

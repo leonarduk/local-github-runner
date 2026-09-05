@@ -1,3 +1,9 @@
+// UNVERIFIED. This pipeline has never been run end to end. Every pool in
+// service was created by hand with `docker compose`; that is the tested path
+// and README.md documents it. Read this as a sketch of the right shape, not
+// as something known to work, and expect to debug it on first use. Do not
+// reach for it during an outage.
+//
 // Provisions and manages a pool of self-hosted GitHub Actions runners for
 // one repository, named by the GITHUB_REPOSITORY parameter.
 //
