@@ -8,7 +8,7 @@
 # on a billing change.
 #
 # One container serves exactly one job and then exits (--ephemeral), so no
-# state carries between jobs. See runner/README.md for the security
+# state carries between jobs. See README.md for the security
 # reasoning and for why this must not be pointed at a public repository.
 
 FROM ubuntu:24.04
@@ -43,15 +43,27 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # The python3 packages are a fallback: setup-python normally downloads its
 # own build into the tool cache, but a workflow that skips setup-python
 # still finds a usable interpreter.
+#
+# procps is named even though the base image already pulls it in
+# transitively. entrypoint.sh deregisters by signalling Runner.Listener with
+# pkill, so a future base-image change that dropped the transitive dependency
+# would silently reintroduce the leaked-runner bug rather than fail the
+# build. Naming it makes that dependency real.
+#
+# uuid-runtime provides uuidgen, which workflows use to generate unique
+# heredoc delimiters when writing multi-line values to $GITHUB_OUTPUT. It is
+# present on a GitHub-hosted ubuntu-latest and absent from ubuntu:24.04.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         git \
         jq \
+        procps \
         sudo \
         tar \
         unzip \
+        uuid-runtime \
         zstd \
         python3 \
         python3-pip \
@@ -82,6 +94,41 @@ RUN set -eux; \
     rm runner.tar.gz; \
     ./bin/installdependencies.sh; \
     chown -R runner:runner /home/runner/actions-runner
+
+# The GitHub CLI. A GitHub-hosted ubuntu-latest ships gh preinstalled, so any
+# workflow that shells out to it works there and fails here -- exactly the
+# class of difference this image exists to erase. Ubuntu 24.04's own package
+# is too old for the `--json` flags these workflows use, so take it from the
+# release instead.
+#
+# Pinned and checksummed for the same reason as the runner tarball above, and
+# to retire the workarounds it replaces: consumer repos had begun curling gh
+# release tarballs at job time with no checksum verification, a lower bar than
+# this file holds itself to everywhere else. Those steps are guarded on gh
+# already being on PATH, so they turn into no-ops once this lands and can be
+# removed at leisure.
+#
+# SHAs come from the gh_<version>_checksums.txt asset on
+# https://github.com/cli/cli/releases. Bump all three together.
+ARG GH_VERSION=2.100.0
+ARG GH_SHA256_AMD64=e4d4bb4498e8d007abe545b6568926793ace1b6447da598294a610018cb164be
+ARG GH_SHA256_ARM64=ea4e7a581a32ccad6cc7923cb1576ac5859ba4b9a16ab22eb8f8a96e78e2e961
+
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) sha="${GH_SHA256_AMD64}" ;; \
+      arm64) sha="${GH_SHA256_ARM64}" ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    dir="gh_${GH_VERSION}_linux_${TARGETARCH}"; \
+    url="https://github.com/cli/cli/releases/download/v${GH_VERSION}/${dir}.tar.gz"; \
+    cd /tmp; \
+    curl -fsSL --retry 5 --retry-delay 5 -o gh.tar.gz "${url}"; \
+    echo "${sha}  gh.tar.gz" | sha256sum -c -; \
+    tar xzf gh.tar.gz; \
+    install -m 0755 "${dir}/bin/gh" /usr/local/bin/gh; \
+    rm -rf gh.tar.gz "${dir}"; \
+    gh --version
 
 COPY --chown=runner:runner entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

@@ -165,13 +165,20 @@ Verified end to end on 2026-09-05 against `leonarduk/spring-professional-udemy-p
 | Base | `ubuntu:24.04` |
 | Runner | `v2.337.0`, SHA256-verified at build, `--disableupdate` |
 | Arch | `linux/amd64` and `linux/arm64` (via `TARGETARCH`) |
-| Tooling | `git`, `curl`, `jq`, `tar`, `unzip`, `zstd`, `sudo`, `python3` 3.12 |
+| Tooling | `git`, `curl`, `jq`, `tar`, `unzip`, `zstd`, `sudo`, `python3` 3.12, `uuidgen`, `pkill` |
+| `gh` | `v2.100.0`, SHA256-verified at build — preinstalled on GitHub-hosted images, so workflows assume it |
 | JS actions | bundled Node 20 and Node 24, verified working |
 | Tool cache | `/opt/hostedtoolcache`, writable — `actions/setup-python` needs this |
 
 Two deliberate choices worth knowing about, because both look like oversights:
 
 - **`sudo` is installed, passwordless.** Workflows install tools with `sudo mv`, matching what a GitHub-hosted runner allows. Removing sudo, or setting `no-new-privileges` in compose, breaks those steps.
+- **`gh` is baked in rather than installed per job.** Ubuntu's own package is
+  too old for the `--json` flags workflows use, so repos had started curling
+  the release tarball at job time without verifying it. Installing it here,
+  checksummed, removes that. Workflows that guard on `gh` already being on
+  `PATH` become no-ops; the binary carries no credentials, so each workflow
+  still supplies its own `GH_TOKEN`.
 - **`RUNNER_MANUALLY_TRAP_SIG=1`.** Makes the runner handle `SIGTERM` itself and finish or cancel the running job cleanly. Without it, `docker stop` mid-job leaves the job hung until GitHub times it out.
 
 ## Managing a pool from Jenkins
