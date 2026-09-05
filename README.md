@@ -21,6 +21,12 @@ Two things reduce the blast radius even so:
 - **Every container serves exactly one job, then exits** (`--ephemeral`). Nothing a job leaves behind — files, processes, a poisoned pip cache — is visible to the next one.
 - **No volumes.** The workspace lives in the container's own writable layer, which is discarded on exit. Adding a named volume for `_work` would quietly undo the isolation.
 
+## Two ways to run it
+
+`runner/Jenkinsfile` drives the whole thing from your existing Jenkins, which is the intended path — see [Managing the pool from Jenkins](#managing-the-pool-from-jenkins). The manual `docker compose` steps below are the same operations by hand, useful for a first run or when debugging.
+
+Either way you need the PAT described next.
+
 ## Setup
 
 You need a personal access token that can register runners:
@@ -73,6 +79,34 @@ Two deliberate choices worth knowing about, because both look like oversights:
 
 - **`sudo` is installed, passwordless.** This repo's `ci.yml` installs `actionlint` with `sudo mv`, matching what a GitHub-hosted runner allows. Removing sudo, or setting `no-new-privileges` in compose, breaks that step.
 - **`RUNNER_MANUALLY_TRAP_SIG=1`.** Makes the runner handle `SIGTERM` itself and finish or cancel the running job cleanly. Without it, `docker stop` mid-job leaves the job hung until GitHub times it out.
+
+## Managing the pool from Jenkins
+
+`runner/Jenkinsfile` is a parameterised pipeline that builds the image and keeps the pool at the requested size. It runs on `agent any`, so it provisions runners on whichever node Jenkins itself runs on.
+
+**One-time setup on the Jenkins instance:**
+
+1. Add a **Secret text** credential with ID **`GITHUB_RUNNER_PAT`**, holding a PAT as described above. Keep it separate from the `GITHUB_TOKEN` credential the allotmint pipelines use for PR comments — this one is strictly more privileged.
+2. Create a **Pipeline** job, *Pipeline script from SCM*, pointing at this repo with **Script Path** `runner/Jenkinsfile`.
+
+The Jenkins node needs the Docker CLI and a reachable Docker socket. `allotmint-jenkins:latest` already has both (`docker` plus Compose v5).
+
+**Parameters:**
+
+| | |
+|---|---|
+| `ACTION` | `up` (default, idempotent), `status`, `restart`, `down` |
+| `RUNNER_COUNT` | Pool size. `2` keeps the two `ci.yml` jobs from queueing behind each other |
+| `RUNNER_HOST_LABEL` | Names the machine, e.g. `bedroom` |
+| `GITHUB_REPOSITORY` | Which repo the runners serve |
+| `REBUILD_IMAGE` | `--no-cache --pull`; needed after bumping `RUNNER_VERSION` |
+
+`ACTION=up` converges the pool without disturbing a container mid-job, so re-running it is always safe. The **Verify** stage polls the GitHub API until the requested number of runners are online with the right label, and fails the build with the container logs attached if they never arrive.
+
+Two implementation notes, because both look odd until you hit them:
+
+- **The PAT is written to `/var/lib/jenkins/gh-runner/pat.secret`, outside the workspace.** Compose bind-mounts that file and re-reads it on every container restart — and these containers restart constantly, one per job. A PAT written into the workspace works right up until Jenkins cleans it, then fails in a way that looks nothing like the cause.
+- **The Verify stage parses JSON using `jq` from inside the runner image** (`docker run --entrypoint jq`). This Jenkins image has `curl` and `git` but neither `jq` nor `python3`, and borrowing the runner image's own `jq` avoids adding a dependency to the node or assuming a pipeline plugin.
 
 ## Maintenance
 

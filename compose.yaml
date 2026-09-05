@@ -10,6 +10,12 @@
 # another job's leftovers. Scale with `docker compose up -d --scale runner=3`
 # -- `container_name` is deliberately unset so that works.
 
+# A fixed project name. Compose otherwise derives it from the directory it
+# is run from, so a Jenkins job -- whose workspace path varies by job name,
+# and which may be wiped between builds -- would lose track of the running
+# pool and silently start a second one alongside it.
+name: gh-runner
+
 services:
   runner:
     build:
@@ -57,4 +63,13 @@ services:
 
 secrets:
   github_pat:
-    file: ./pat.secret
+    # Compose bind-mounts this file into the container, and re-reads it on
+    # every restart -- and these containers restart constantly by design,
+    # one per job. So the file has to outlive whatever created it.
+    #
+    # That matters for the Jenkins job (runner/Jenkinsfile): a Jenkins
+    # workspace is not a durable location, so the job writes the PAT to a
+    # persistent path and points RUNNER_PAT_FILE at it. Deleting the file
+    # after `compose up` would leave the pool working right up until the
+    # next container restart, then fail in a way that looks unrelated.
+    file: ${RUNNER_PAT_FILE:-./pat.secret}
