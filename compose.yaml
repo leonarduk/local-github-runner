@@ -1,0 +1,49 @@
+# Keeps N ephemeral runners available for this repo.
+#
+#   cd runner
+#   printf '%s' 'ghp_your_pat_here' > pat.secret   # gitignored
+#   docker compose up -d --build
+#   docker compose logs -f
+#
+# Each container serves one job and exits; `restart: always` brings a fresh
+# one straight back, so the pool stays warm without any job ever inheriting
+# another job's leftovers. Scale with `docker compose up -d --scale runner=3`
+# -- `container_name` is deliberately unset so that works.
+
+services:
+  runner:
+    build:
+      context: .
+      # Uncomment to track a newer runner release without editing the
+      # Dockerfile. The checksums are per-version, so bump those too.
+      # args:
+      #   RUNNER_VERSION: 2.337.0
+    image: spring-practice-tests-runner:local
+    restart: always
+    environment:
+      GITHUB_REPOSITORY: leonarduk/spring-professional-udemy-practice-tests
+      RUNNER_TOKEN_FILE: /run/secrets/github_pat
+      RUNNER_LABELS: self-hosted,linux,x64,docker
+    secrets:
+      - github_pat
+    # No volume for /home/runner/_work on purpose. The container is thrown
+    # away after one job, so its own writable layer already gives each job a
+    # clean checkout -- and a named volume would quietly reintroduce the
+    # cross-job state that --ephemeral exists to prevent. A tmpfs is not the
+    # answer either: Docker mounts those noexec and 64 MB by default, which
+    # breaks anything a build tries to execute out of the workspace.
+    #
+    # Note there is deliberately no `no-new-privileges` here. The repo's own
+    # ci.yml installs actionlint with `sudo mv`, matching what a
+    # GitHub-hosted runner allows, and that flag blocks setuid and so breaks
+    # sudo. Isolation comes from the container being ephemeral, not from
+    # restricting the job's rights inside it.
+    #
+    # A job gets no more of the host than it needs. Raise these if a build
+    # starts being OOM-killed, rather than removing them outright.
+    mem_limit: 2g
+    pids_limit: 512
+
+secrets:
+  github_pat:
+    file: ./pat.secret
