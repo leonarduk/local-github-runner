@@ -39,6 +39,54 @@ Two things reduce the blast radius even so:
 
 Either way you need the PAT described next.
 
+## Host prerequisites
+
+The pool is only as reliable as the machine under it, and two of these are the
+kind of thing you debug for an afternoon before suspecting them.
+
+**Docker.** Docker Desktop on Windows or macOS, Docker Engine on Linux. On
+Windows use the WSL2 backend; the Hyper-V backend works but is slower at the
+bind mounts this uses.
+
+Set the engine to **start on login** — Docker Desktop → *Settings* → *General* →
+*Start Docker Desktop when you sign in*. `restart: always` brings a pool back
+after a reboot, but only once the engine is running. Without it the jobs simply
+queue with no runner, which looks exactly like the billing failure this exists
+to work around.
+
+Give it enough memory. Each runner declares `mem_limit: 2g`, so *N* runners
+across all your pools can ask for 2*N* GiB, against whatever ceiling Docker
+Desktop is set to in *Settings* → *Resources*. Over-committing does not error —
+it shows up as jobs mysteriously crawling when several repos build at once.
+Count the containers, not the pools.
+
+**Sleep. This one silently cancels jobs.** A host that suspends mid-job stops
+the runner's heartbeat, and GitHub cancels the job server-side. The signature is
+unmistakable once you know it: the job dies at almost exactly your sleep
+timeout, and the log timestamps *inside* it span far longer than the job's
+recorded duration, because the clock jumps on resume. It is intermittent — jobs
+shorter than the timeout finish fine — so it reads as a flaky test suite rather
+than a host problem.
+
+Check the timeout, then disable it while the machine is serving runners:
+
+```powershell
+# Windows -- STANDBYIDLE's AC index is the timeout in seconds (0x258 = 10 min)
+powercfg /query SCHEME_CURRENT SUB_SLEEP
+powercfg /change standby-timeout-ac 0
+```
+
+```bash
+# macOS
+sudo pmset -c sleep 0
+# Linux -- or set logind's IdleAction to ignore
+systemd-inhibit --what=idle:sleep --who=gh-runner --why=CI sleep infinity &
+```
+
+Disabling sleep on battery too is usually the wrong trade on a laptop; if the
+machine is a CI host on AC, `standby-timeout-ac 0` is enough. Display sleep is
+harmless — it is system standby that kills jobs.
+
 ## Setup
 
 You need a personal access token that can register runners:
@@ -69,7 +117,6 @@ The runner then appears under the repo's **Settings → Actions → Runners** as
 
 `GITHUB_REPOSITORY` has no default and the `up` fails without it. That is deliberate: it used to default to the one repo this was written for, which is exactly the kind of thing that survives a copy to a new machine and quietly registers runners against the wrong repository.
 
-The host also needs Docker Desktop (or the daemon) set to start on login. `restart: always` brings a pool back after a reboot, but only once the engine is running — otherwise the jobs simply queue with no runner, which looks exactly like the billing failure this exists to work around.
 
 ## Several repos from one checkout
 
