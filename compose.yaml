@@ -1,9 +1,12 @@
-# Keeps N ephemeral runners available for this repo.
+# Keeps N ephemeral runners available for one GitHub repository.
 #
-#   cd runner
 #   printf '%s' 'ghp_your_pat_here' > pat.secret   # gitignored
-#   docker compose up -d --build
+#   GITHUB_REPOSITORY=owner/repo #   COMPOSE_PROJECT_NAME=gh-runner-repo #     docker compose up -d --build
 #   docker compose logs -f
+#
+# One checkout of this repo serves as many pools as you like: the two
+# variables above are what separate them. See README.md, "Several repos from
+# one checkout".
 #
 # Each container serves one job and exits; `restart: always` brings a fresh
 # one straight back, so the pool stays warm without any job ever inheriting
@@ -11,11 +14,17 @@
 # one-off with `docker compose up -d --scale runner=3` -- `container_name` is
 # deliberately unset so that works.
 
-# A fixed project name. Compose otherwise derives it from the directory it
-# is run from, so a Jenkins job -- whose workspace path varies by job name,
-# and which may be wiped between builds -- would lose track of the running
-# pool and silently start a second one alongside it.
-name: gh-runner
+# A default project name, and only a default. Compose otherwise derives one
+# from the directory it is run from, so a Jenkins job -- whose workspace path
+# varies by job name, and which may be wiped between builds -- would lose
+# track of the running pool and silently start a second one alongside it.
+#
+# It has to be OVERRIDDEN per repository, via COMPOSE_PROJECT_NAME (or -p),
+# because the project name is the only thing separating one pool from
+# another. Two pools sharing it are the same pool: an `up` for the second
+# repo silently reconfigures the first repo's containers rather than adding
+# to them. Leaving this bare is safe only on a host serving a single repo.
+name: ${COMPOSE_PROJECT_NAME:-gh-runner}
 
 services:
   runner:
@@ -34,7 +43,10 @@ services:
     # stops every container past the first, and the jobs they were serving
     # start queueing behind each other for no visible reason.
     #
-    # Two, because ci.yml has two jobs and neither should wait for the other.
+    # Two is a starting point, not a law: size it to the number of jobs in
+    # the target repo's workflows that can run at once. Fewer runners than
+    # concurrent jobs is not an error, just queueing, which looks like
+    # slowness rather than a misconfiguration.
     deploy:
       replicas: 2
     # Compose's default 10s is too short for entrypoint.sh's deregistration,
@@ -51,7 +63,11 @@ services:
     environment:
       # Overridable from a .env file beside this one, so the same compose
       # file works unchanged on every runner host. See .env.example.
-      GITHUB_REPOSITORY: ${GITHUB_REPOSITORY:-leonarduk/spring-professional-udemy-practice-tests}
+      # No default on purpose. This used to name the one repo the tooling was
+      # written for, which is exactly the sort of thing that survives a copy
+      # to a new machine and quietly registers runners against the wrong
+      # repository. Unset now fails the `up` with this message instead.
+      GITHUB_REPOSITORY: ${GITHUB_REPOSITORY:?set GITHUB_REPOSITORY to owner/repo -- see README.md}
       RUNNER_TOKEN_FILE: /run/secrets/github_pat
       # RUNNER_HOST_LABEL names the machine, so a workflow can target one
       # host and `gh api .../actions/runners` says which box a runner is on.
@@ -72,10 +88,9 @@ services:
     # answer either: Docker mounts those noexec and 64 MB by default, which
     # breaks anything a build tries to execute out of the workspace.
     #
-    # Note there is deliberately no `no-new-privileges` here. The repo's own
-    # ci.yml installs actionlint with `sudo mv`, matching what a
-    # GitHub-hosted runner allows, and that flag blocks setuid and so breaks
-    # sudo. Isolation comes from the container being ephemeral, not from
+    # Note there is deliberately no `no-new-privileges` here. Workflows
+    # install tools with `sudo mv`, matching what a GitHub-hosted runner
+    # allows, and that flag blocks setuid and so breaks sudo. Isolation comes from the container being ephemeral, not from
     # restricting the job's rights inside it.
     #
     # A job gets no more of the host than it needs. Raise these if a build

@@ -1,11 +1,11 @@
 # A self-hosted GitHub Actions runner, as an ephemeral container.
 #
-# Exists because this repo is private and its GitHub-hosted Actions minutes
-# are exhausted -- every workflow run has failed in seconds, with no logs,
-# since the repo's first commit ("The job was not started because recent
-# account payments have failed or your spending limit needs to be
-# increased"). Self-hosted runners do not consume Actions minutes, so CI can
-# tell us something again without waiting on a billing change.
+# Exists because these repos are private and their GitHub-hosted Actions
+# minutes are exhausted -- every workflow run failed in seconds, with no
+# logs ("The job was not started because recent account payments have failed
+# or your spending limit needs to be increased"). Self-hosted runners do not
+# consume Actions minutes, so CI can tell us something again without waiting
+# on a billing change.
 #
 # One container serves exactly one job and then exits (--ephemeral), so no
 # state carries between jobs. See runner/README.md for the security
@@ -37,9 +37,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     RUNNER_MANUALLY_TRAP_SIG=1
 
 # ca-certificates/curl/tar: fetching the runner and the registration token.
-# git: every checkout. jq: parsing the token response. sudo: the repo's own
-# ci.yml installs actionlint with `sudo mv` -- a GitHub-hosted runner has
-# passwordless sudo, so a self-hosted one must too or that step breaks.
+# git: every checkout. jq: parsing the token response. sudo: workflows here
+# install tools with `sudo mv` -- a GitHub-hosted runner has passwordless
+# sudo, so a self-hosted one must too or those steps break.
 # The python3 packages are a fallback: setup-python normally downloads its
 # own build into the tool cache, but a workflow that skips setup-python
 # still finds a usable interpreter.

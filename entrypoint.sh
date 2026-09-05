@@ -50,7 +50,7 @@ api() {
 # --- mint a registration token ------------------------------------------
 #
 # Needs a classic PAT with `repo`, or a fine-grained PAT with
-# Administration: read & write on this repository.
+# Administration: read & write on the repository being served.
 log "requesting a registration token for ${GITHUB_REPOSITORY}"
 response="$(api registration-token)" \
   || fail "could not mint a registration token -- check the PAT's scopes and that it can see ${GITHUB_REPOSITORY}"
