@@ -32,7 +32,12 @@ If you need something else, use something else:
 
 ## ⚠️ Private repositories only
 
-**Never point this at a public repository.** On a public repo, anyone can open a pull request, and a workflow triggered by that PR runs *their* code on *your* machine. (GitHub defaults public repos to requiring approval for a first-time contributor, so it is not quite a drive-by -- but that bar is one trivial merged PR high, and it is a setting that can drift.) GitHub's own documentation is unusually blunt about this, and the container boundary here is not a security boundary — jobs get passwordless `sudo` inside the container (see below).
+**Never point this at a public repository.** On a public repo, anyone can open a pull request, and a workflow triggered by that PR runs *their* code on *your* machine. (GitHub defaults public repos to requiring approval for a first-time contributor, so it is not quite a drive-by -- but that bar is one trivial merged PR high, and it is a setting that can drift.) [GitHub's own documentation](https://docs.github.com/en/actions/reference/security/secure-use)
+is unusually blunt about this: "Self-hosted runners should almost never be used
+for public repositories on GitHub, because any user can open pull requests
+against the repository and compromise the environment." The container boundary
+here is not a security boundary either — jobs get passwordless `sudo` inside the
+container (see below).
 
 Point it only at repos where you control who can trigger a run. If one is ever made public, tear its pool down first.
 
@@ -43,7 +48,8 @@ container's whole life, not only during registration. Jobs run with passwordless
 `sudo`, so any job can read it. GitHub's fork protections do not cover this: they
 withhold *workflow secrets* from fork pull requests and make `GITHUB_TOKEN`
 read-only, but this PAT is a file on the runner, not a workflow secret. Prefer a
-fine-grained PAT limited to the single target repository, which bounds what a
+[fine-grained PAT](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
+limited to the single target repository, which bounds what a
 leaked token can reach.
 
 Two things reduce the blast radius even so:
@@ -161,6 +167,12 @@ Disabling sleep on battery too is usually the wrong trade on a laptop; if the
 machine is a CI host on AC, `standby-timeout-ac 0` is enough. Display sleep is
 harmless — it is system standby that kills jobs.
 
+Registering a runner by hand, without any of the tooling in this repo, is
+[documented directly by GitHub](https://docs.github.com/actions/hosting-your-own-runners/adding-self-hosted-runners)
+— *Settings -> Actions -> Runners -> New self-hosted runner* on the target repo.
+Everything below is the same registration, done by `entrypoint.sh` inside a
+disposable container instead of by hand on a long-lived machine.
+
 ## Setup
 
 You need a personal access token that can register runners:
@@ -251,6 +263,9 @@ Every job in the workflow needs the label, or the untouched ones keep failing to
 
 Verified end to end on 2026-09-05 against `leonarduk/spring-professional-udemy-practice-tests`: both its jobs ran on a pool from this image and passed, in 7s and 32s, having previously failed in about 2s without starting.
 
+GitHub's own reference for this syntax and the default label set is
+[Choosing the runner for a job](https://docs.github.com/actions/using-jobs/choosing-the-runner-for-a-job).
+
 ## What the image provides
 
 | | |
@@ -300,3 +315,18 @@ That relies on `entrypoint.sh` signalling `Runner.Listener` directly rather than
 - **`mem_limit: 2g` / `pids_limit: 512`** are conservative. If a build is OOM-killed, raise them rather than removing them.
 - **Linux only.** A workflow pinned to `windows-*` or `macos-*` will never match these runners.
 - **Pool names use the repo name, not `owner/repo`.** Two repos of the same name under different owners would collide.
+
+## Further reading
+
+Everything above is GitHub's own supported mechanism -- a self-hosted runner
+registered the normal way -- wrapped in a container and a compose file for
+convenience. None of it depends on this repo; every piece is documented
+independently, and it is worth reading the source rather than taking this
+README's word for the security-critical parts:
+
+- [About self-hosted runners](https://docs.github.com/actions/hosting-your-own-runners) — what one is, and the three levels (repository, organization, enterprise).
+- [Adding self-hosted runners](https://docs.github.com/actions/hosting-your-own-runners/adding-self-hosted-runners) — the manual registration flow `entrypoint.sh` automates.
+- [Secure use reference](https://docs.github.com/en/actions/reference/security/secure-use) — the authoritative source for the public-repository warning above. Read this one regardless of whether you read anything else here.
+- [Choosing the runner for a job](https://docs.github.com/actions/using-jobs/choosing-the-runner-for-a-job) — `runs-on:` syntax and how label matching works.
+- [Managing your personal access tokens](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) — classic vs. fine-grained, and how to scope the one this needs.
+- [actions-runner-controller](https://github.com/actions/actions-runner-controller) — GitHub's own answer once one host and a compose file stop being enough.
