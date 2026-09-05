@@ -27,7 +27,11 @@ API_URL="${GITHUB_API_URL:-https://api.github.com}"
 # Distinct per container, so several can run side by side. GitHub rejects a
 # duplicate name unless --replace is passed, and silently replacing another
 # live runner is a worse failure than refusing to start.
-RUNNER_NAME="${RUNNER_NAME:-$(hostname)-$$}"
+#
+# RUNNER_HOST_LABEL, when set, prefixes the name so that the runner list on
+# GitHub says which physical machine a runner is on. Container hostnames are
+# random hex, which is no help at all once runners live on more than one box.
+RUNNER_NAME="${RUNNER_NAME:-${RUNNER_HOST_LABEL:+${RUNNER_HOST_LABEL}-}$(hostname)-$$}"
 RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,linux,docker}"
 RUNNER_GROUP="${RUNNER_GROUP:-Default}"
 WORK_DIR="${RUNNER_WORK_DIRECTORY:-/home/runner/_work}"

@@ -21,9 +21,20 @@ services:
     image: spring-practice-tests-runner:local
     restart: always
     environment:
-      GITHUB_REPOSITORY: leonarduk/spring-professional-udemy-practice-tests
+      # Overridable from a .env file beside this one, so the same compose
+      # file works unchanged on every runner host. See .env.example.
+      GITHUB_REPOSITORY: ${GITHUB_REPOSITORY:-leonarduk/spring-professional-udemy-practice-tests}
       RUNNER_TOKEN_FILE: /run/secrets/github_pat
-      RUNNER_LABELS: self-hosted,linux,x64,docker
+      # RUNNER_HOST_LABEL names the machine, so a workflow can target one
+      # host and `gh api .../actions/runners` says which box a runner is on.
+      # Container hostnames are random hex, which is useless for telling two
+      # machines apart once there is more than one.
+      RUNNER_LABELS: self-hosted,linux,x64,docker,${RUNNER_HOST_LABEL:-unlabelled-host}
+      # Deliberately not setting RUNNER_NAME: it must be unique per
+      # container or `--scale` fails, since GitHub rejects a duplicate
+      # runner name. entrypoint.sh builds one from this label plus the
+      # container's own hostname and pid.
+      RUNNER_HOST_LABEL: ${RUNNER_HOST_LABEL:-}
     secrets:
       - github_pat
     # No volume for /home/runner/_work on purpose. The container is thrown
