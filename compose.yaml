@@ -7,8 +7,9 @@
 #
 # Each container serves one job and exits; `restart: always` brings a fresh
 # one straight back, so the pool stays warm without any job ever inheriting
-# another job's leftovers. Scale with `docker compose up -d --scale runner=3`
-# -- `container_name` is deliberately unset so that works.
+# another job's leftovers. The pool size is declared below; override it for a
+# one-off with `docker compose up -d --scale runner=3` -- `container_name` is
+# deliberately unset so that works.
 
 # A fixed project name. Compose otherwise derives it from the directory it
 # is run from, so a Jenkins job -- whose workspace path varies by job name,
@@ -26,6 +27,27 @@ services:
       #   RUNNER_VERSION: 2.337.0
     image: spring-practice-tests-runner:local
     restart: always
+    # The pool size, declared so that a bare `docker compose up -d` converges
+    # to it. Compose honours this outside swarm, and an explicit
+    # `--scale runner=N` still wins -- which is what runner/Jenkinsfile passes
+    # from RUNNER_COUNT. Without a default here, a plain `up -d` silently
+    # stops every container past the first, and the jobs they were serving
+    # start queueing behind each other for no visible reason.
+    #
+    # Two, because ci.yml has two jobs and neither should wait for the other.
+    deploy:
+      replicas: 2
+    # Compose's default 10s is too short for entrypoint.sh's deregistration,
+    # which starts only once run.sh has wound down and then costs two GitHub
+    # round-trips (mint a removal token, then `config.sh remove`).
+    #
+    # Necessary but NOT sufficient on its own: SIGTERM currently reaches
+    # run.sh and never the Runner.Listener process that
+    # RUNNER_MANUALLY_TRAP_SIG=1 arms, so the runner never exits and the
+    # container is SIGKILLed whatever this is set to -- measured at a full 60s
+    # on 2026-09-05. See "Shutdown does not deregister" in README.md. This
+    # only starts paying off once that signalling is fixed.
+    stop_grace_period: 60s
     environment:
       # Overridable from a .env file beside this one, so the same compose
       # file works unchanged on every runner host. See .env.example.

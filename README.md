@@ -51,7 +51,9 @@ runner-entrypoint: configuring 4f2c1a9b3e77-1
 runner-entrypoint: waiting for a job
 ```
 
-The runner then appears under **Settings → Actions → Runners** as idle. Scale the pool with `docker compose up -d --scale runner=3`.
+The runner then appears under **Settings → Actions → Runners** as idle. `compose.yaml` declares two of them, matching the two jobs in `ci.yml`; override that for a one-off with `docker compose up -d --scale runner=3`.
+
+The host also needs Docker Desktop (or the daemon) set to start on login. `restart: always` brings the pool back after a reboot, but only once the engine is running — otherwise the jobs simply queue with no runner, which looks exactly like the billing failure this exists to work around.
 
 ## Point the workflow at it
 
@@ -62,7 +64,11 @@ The runner will sit idle until a job asks for it. In `.github/workflows/ci.yml`:
 +    runs-on: [self-hosted, linux, x64]
 ```
 
-**This change is not applied here.** PR #9 also edits `ci.yml`, and making the same file a conflict in two open PRs is not worth it — apply it once the merge order is settled. Both jobs (`validate` and `lint-workflows`) need it, or the untouched one keeps failing to start for the original reason.
+**This change lives on PR #9's branch, not here.** That PR is what creates `ci.yml`, so the edit belongs with the file rather than making it a conflict across two open PRs. The `ubuntu-latest` line is kept commented directly above each replacement, so going back once billing is sorted is a one-line edit at the point of use rather than an archaeology exercise.
+
+Both jobs (`validate` and `lint-workflows`) need the label, or the untouched one keeps failing to start for the original reason.
+
+Verified end to end on 2026-09-05: both jobs ran on this pool and passed, in 7s and 32s, having previously failed in about 2s without starting.
 
 ## What the image provides
 
@@ -120,11 +126,13 @@ Bumping the runner version means editing `RUNNER_VERSION` **and** the two checks
 docker compose down
 ```
 
-Each container deregisters itself on the way out, so nothing should be left behind. If a container was killed rather than stopped — `docker kill`, a host crash — its runner lingers as "offline" under Settings → Actions → Runners and needs removing by hand there.
+In principle each container deregisters itself on the way out. In practice it does not — see **Shutdown does not deregister** below — so expect to clear strays under Settings → Actions → Runners, or with `gh api -X DELETE repos/OWNER/REPO/actions/runners/ID`.
 
 ## Known limits
 
 - **No Docker-in-Docker.** No job here needs it. Adding it means mounting the host's Docker socket, which hands any job root on the host — do not do that on the strength of this README alone.
 - **`actions/cache` has no backing store**, so cache steps are no-ops that cost a little time. Fine for this repo; worth knowing if a workflow starts depending on a warm cache.
+- **`pip install` only works after `actions/setup-python`.** The base is Ubuntu 24.04, whose system interpreter refuses installs under PEP 668 (`externally-managed-environment`). `setup-python` puts its own interpreter on PATH first, so `ci.yml` is fine — but a workflow that drops that step keeps working on a GitHub-hosted runner and fails here.
+- **Shutdown does not deregister.** A plain `docker stop`, or any `compose up -d` that recreates a running container, leaves a runner registered but `offline` with nothing behind it — and the SIGKILLed container is then restarted by `restart: always` with `.runner` and `.credentials` still on its disk, so it crash-loops on `Cannot configure the runner because it is already configured`. The cause is in `entrypoint.sh`: it sends SIGTERM to `run.sh`, but `RUNNER_MANUALLY_TRAP_SIG=1` is read by the `Runner.Listener` process underneath, which never sees the signal, so `deregister()` is never reached. Measured 2026-09-05: a `docker stop -t 60` waited the full 60s and was still killed. Recover with `docker compose up -d --force-recreate`, which builds genuinely fresh containers. `stop_grace_period: 60s` is set in `compose.yaml` ready for the fix, but does not help by itself.
 - **`mem_limit: 2g` / `pids_limit: 512`** are conservative. If a build is OOM-killed, raise them rather than removing them.
 - The container is `linux/amd64` on this host. A workflow pinned to `windows-*` or `macos-*` will never match it.
