@@ -68,8 +68,22 @@ This repo did carry a Jenkins pipeline to do the same thing. It was removed:
 for a single host it wrapped two environment variables and a `compose up` while
 adding a stateful service holding the Docker socket -- root on the host -- and
 it was never actually run end to end. Per-machine setup is cheap enough that
-the orchestration was not buying anything. If you later want it driven from CI,
-the operations below are the whole of it.
+the orchestration was not buying anything.
+
+`pools.sh` wraps the operations below for a host running several pools:
+
+```bash
+./pools.sh up    <name> <owner/repo> [count]   # bring a pool up
+./pools.sh down  <name>                        # tear one down
+./pools.sh reset <name> <owner/repo> [count]    # down, then up fresh
+./pools.sh list                                 # every pool on this host, and what GitHub actually sees
+```
+
+`<name>` is just the label in the project name (`gh-runner-<name>`); it need
+not match the repo. `list` is the one worth knowing about even if you never
+use the others: it cross-checks each pool's containers against GitHub's own
+`actions/runners` API, which is the only way to catch a pool that looks fine
+in `docker ps` but registered nothing.
 
 You need the PAT described next.
 
