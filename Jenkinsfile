@@ -61,7 +61,7 @@ down = stop the pool and deregister every runner.''')
         PAT_FILE    = '/var/lib/jenkins/gh-runner/pat.secret'
         // Must match `image:` in compose.yaml. Verify borrows this image's
         // jq, since the Jenkins node has neither jq nor python3.
-        RUNNER_IMAGE = 'spring-practice-tests-runner:local'
+        RUNNER_IMAGE = 'local-github-runner:local'
     }
 
     stages {

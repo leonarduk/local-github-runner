@@ -25,7 +25,7 @@ services:
       # Dockerfile. The checksums are per-version, so bump those too.
       # args:
       #   RUNNER_VERSION: 2.337.0
-    image: spring-practice-tests-runner:local
+    image: local-github-runner:local
     restart: always
     # The pool size, declared so that a bare `docker compose up -d` converges
     # to it. Compose honours this outside swarm, and an explicit
