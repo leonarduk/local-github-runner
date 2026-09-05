@@ -51,11 +51,21 @@ Two things reduce the blast radius even so:
 - **Every container serves exactly one job, then exits** (`--ephemeral`). Nothing a job leaves behind — files, processes, a poisoned pip cache — is visible to the next one.
 - **No volumes.** The workspace lives in the container's own writable layer, which is discarded on exit. Adding a named volume for `_work` would quietly undo the isolation.
 
-## Two ways to run it
+## How it is run
 
-`Jenkinsfile` drives the whole thing from an existing Jenkins, which is the intended path — see [Managing a pool from Jenkins](#managing-a-pool-from-jenkins). The manual `docker compose` steps below are the same operations by hand, useful for a first run or when debugging.
+By hand, per machine, with `docker compose`. There is no control plane and
+nothing to install besides Docker: a host that should serve runners gets a
+clone, a PAT, and one `compose up` per pool. A machine that should stop serving
+them gets a `compose down`.
 
-Either way you need the PAT described next.
+This repo did carry a Jenkins pipeline to do the same thing. It was removed:
+for a single host it wrapped two environment variables and a `compose up` while
+adding a stateful service holding the Docker socket -- root on the host -- and
+it was never actually run end to end. Per-machine setup is cheap enough that
+the orchestration was not buying anything. If you later want it driven from CI,
+the operations below are the whole of it.
+
+You need the PAT described next.
 
 ## Host prerequisites
 
@@ -182,6 +192,25 @@ The runner then appears under the repo's **Settings → Actions → Runners** as
 `GITHUB_REPOSITORY` has no default and the `up` fails without it. That is deliberate: it used to default to the one repo this was written for, which is exactly the kind of thing that survives a copy to a new machine and quietly registers runners against the wrong repository.
 
 
+### Check the pool is really up
+
+`docker compose up` returning 0 means the containers started, not that any
+runner registered. Registration happens later, inside the container, and can
+fail on its own -- a PAT without the right scope, a typo in
+`GITHUB_REPOSITORY`, a repo the token cannot see -- leaving containers that
+restart forever while GitHub shows nothing. Ask GitHub rather than Docker:
+
+```bash
+gh api repos/OWNER/REPO/actions/runners \n  --jq '.runners[] | "\(.name)  \(.status)  busy=\(.busy)"'
+```
+
+Expect one `online` line per container, each prefixed with the host label from
+`.env`. Fewer than you scaled to means some are still registering or some are
+failing; `docker compose logs -f` says which. Runners listed `offline` with no
+container behind them are strays from a container that was killed rather than
+stopped -- clear them with
+`gh api -X DELETE repos/OWNER/REPO/actions/runners/ID`.
+
 ## Several repos from one checkout
 
 The compose **project name** is the only thing separating one pool from another. Two pools sharing it are the same pool — an `up` for the second repo silently reconfigures the first repo's containers rather than adding to them. So set it alongside the repository:
@@ -244,49 +273,6 @@ Two deliberate choices worth knowing about, because both look like oversights:
   `PATH` become no-ops; the binary carries no credentials, so each workflow
   still supplies its own `GH_TOKEN`.
 - **`RUNNER_MANUALLY_TRAP_SIG=1`.** Makes the runner handle `SIGTERM` itself and finish or cancel the running job cleanly. Without it, `docker stop` mid-job leaves the job hung until GitHub times it out.
-
-## Managing a pool from Jenkins
-
-> **Unverified.** This pipeline has never been run end to end. Every pool
-> described in this README was created by hand with `docker compose`, and the
-> commands in the rest of this file are the tested path. Treat the Jenkinsfile
-> as a sketch to read rather than something known to work, and expect to debug
-> it the first time. It is kept because the shape is right, not because it has
-> earned its place.
-
-`Jenkinsfile` is a parameterised pipeline that builds the image and keeps one pool at the requested size. It runs on `agent any`, so it provisions runners on whichever node Jenkins itself runs on.
-
-You very probably do not need it. For one host it wraps two environment
-variables and a `docker compose up`, while adding a stateful service that holds
-the Docker socket -- root on the host -- to do so. It starts earning its keep
-with a second machine, or when the PAT should live in a credential store rather
-than a file, or when you want the pool re-converged on a schedule.
-
-**One-time setup on the Jenkins instance:**
-
-1. Add a **Secret text** credential with ID **`GITHUB_RUNNER_PAT`**, holding a PAT as described above. Keep it separate from any `GITHUB_TOKEN` credential used for PR comments — this one is strictly more privileged.
-2. Create a **Pipeline** job, *Pipeline script from SCM*, pointing at this repo with **Script Path** `Jenkinsfile`.
-
-The Jenkins node needs the Docker CLI and a reachable Docker socket. `allotmint-jenkins:latest` already has both (`docker` plus Compose v5).
-
-**One job per pool.** The compose project name is derived from `GITHUB_REPOSITORY`, so a second job pointed at a second repository manages a separate set of containers rather than fighting over the first job's.
-
-**Parameters:**
-
-| | |
-|---|---|
-| `ACTION` | `up` (default, idempotent), `status`, `restart`, `down` |
-| `RUNNER_COUNT` | Pool size. Size it to the jobs that can run at once, or they queue |
-| `RUNNER_HOST_LABEL` | Names the machine, e.g. `bedroom` |
-| `GITHUB_REPOSITORY` | Which repo the runners serve. Required; also names the pool |
-| `REBUILD_IMAGE` | `--no-cache --pull`; needed after bumping `RUNNER_VERSION` |
-
-`ACTION=up` converges the pool without disturbing a container mid-job, so re-running it is always safe. The **Verify** stage polls the GitHub API until the requested number of runners are online with the right label, and fails the build with the container logs attached if they never arrive.
-
-Two implementation notes, because both look odd until you hit them:
-
-- **The PAT is written under `/var/lib/jenkins/gh-runner/<pool>/`, outside the workspace.** Compose bind-mounts that file and re-reads it on every container restart — and these containers restart constantly, one per job. A PAT written into the workspace works right up until Jenkins cleans it, then fails in a way that looks nothing like the cause.
-- **The Verify stage parses JSON using `jq` from inside the runner image** (`docker run --entrypoint jq`). The Jenkins image has `curl` and `git` but neither `jq` nor `python3`, and borrowing the runner image's own `jq` avoids adding a dependency to the node or assuming a pipeline plugin.
 
 ## Maintenance
 

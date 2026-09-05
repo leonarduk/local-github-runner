@@ -15,9 +15,10 @@
 # deliberately unset so that works.
 
 # A default project name, and only a default. Compose otherwise derives one
-# from the directory it is run from, so a Jenkins job -- whose workspace path
-# varies by job name, and which may be wiped between builds -- would lose
-# track of the running pool and silently start a second one alongside it.
+# from the directory it is run from, so anything driving this from a scratch
+# directory -- a CI job whose workspace path varies, or a clone made somewhere
+# new -- would lose track of the running pool and silently start a second one
+# alongside it.
 #
 # It has to be OVERRIDDEN per repository, via COMPOSE_PROJECT_NAME (or -p),
 # because the project name is the only thing separating one pool from
@@ -38,8 +39,7 @@ services:
     restart: always
     # The pool size, declared so that a bare `docker compose up -d` converges
     # to it. Compose honours this outside swarm, and an explicit
-    # `--scale runner=N` still wins -- which is what the Jenkinsfile passes
-    # from RUNNER_COUNT. Without a default here, a plain `up -d` silently
+    # `--scale runner=N` still wins. Without a default here, a plain `up -d` silently
     # stops every container past the first, and the jobs they were serving
     # start queueing behind each other for no visible reason.
     #
@@ -104,9 +104,9 @@ secrets:
     # every restart -- and these containers restart constantly by design,
     # one per job. So the file has to outlive whatever created it.
     #
-    # That matters for the Jenkins job (Jenkinsfile): a Jenkins
-    # workspace is not a durable location, so the job writes the PAT to a
-    # persistent path and points RUNNER_PAT_FILE at it. Deleting the file
-    # after `compose up` would leave the pool working right up until the
-    # next container restart, then fail in a way that looks unrelated.
+    # So it cannot live in a scratch directory. Anything driving this from a
+    # temporary workspace must write the PAT to a persistent path and point
+    # RUNNER_PAT_FILE at it. Deleting the file after `compose up` leaves the
+    # pool working right up until the next container restart, then failing in
+    # a way that looks unrelated.
     file: ${RUNNER_PAT_FILE:-./pat.secret}
