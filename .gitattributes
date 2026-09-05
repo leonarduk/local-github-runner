@@ -1,0 +1,10 @@
+# Everything here is consumed inside a Linux container, and `docker build`
+# reads the working tree rather than the git blob. This repo is worked on
+# from Windows with core.autocrlf=true, so without this a fresh clone gets
+# CRLF on disk and the image breaks in a way that is genuinely hard to read:
+# the shebang becomes "#!/usr/bin/env bash\r", and the container exits with
+# "bad interpreter: bash^M: no such file or directory".
+#
+# The Dockerfile is covered for the same reason -- a CRLF line continuation
+# silently changes what the shell in a RUN step receives.
+* text eol=lf
