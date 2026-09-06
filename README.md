@@ -2,6 +2,78 @@
 
 Ephemeral, containerised, self-hosted GitHub Actions runners for private repositories. One checkout runs a pool per repository, on as many machines as you like.
 
+**[Quick start](#quick-start)** -- if you just want it running, start there.
+
+<details>
+<summary>Everything else in this file</summary>
+
+- [Why this exists](#why-this-exists)
+- [What this is not](#what-this-is-not)
+- [Private repositories only](#-private-repositories-only)
+- [How it is run](#how-it-is-run)
+- [Host prerequisites](#host-prerequisites)
+- [Setup](#setup)
+- [Several repos from one checkout](#several-repos-from-one-checkout)
+- [Several machines](#several-machines)
+- [Point a workflow at it](#point-a-workflow-at-it)
+- [What the image provides](#what-the-image-provides)
+- [Maintenance](#maintenance)
+- [Teardown](#teardown)
+- [Known limits](#known-limits)
+- [Further reading](#further-reading)
+
+</details>
+
+## Quick start
+
+**Before you start, once per machine:**
+- Docker Desktop (or Docker Engine on Linux), set to start on login
+- [GitHub CLI](https://cli.github.com), authenticated -- `gh auth login`
+- A classic personal access token with `repo` scope (Setup below explains the fine-grained alternative)
+
+**Windows:** run every command below through Git Bash, not raw PowerShell, and not
+bare `bash` -- see [Host prerequisites](#host-prerequisites) if a command below says
+`gh: command not found` even though `gh` works fine elsewhere. That single gotcha costs
+more time than everything else in this file combined.
+
+**1. Clone it:**
+```bash
+git clone https://github.com/leonarduk/local-github-runner
+cd local-github-runner
+```
+
+**2. Save your PAT -- gitignored, never committed:**
+```bash
+# macOS / Linux / Git Bash
+printf '%s' 'ghp_your_token_here' > pat.secret
+```
+```powershell
+# Windows PowerShell
+[System.IO.File]::WriteAllText("$PWD\pat.secret", 'ghp_your_token_here')
+```
+
+**3. Name this machine:**
+```bash
+cp .env.example .env
+# then edit .env and set RUNNER_HOST_LABEL to something like "bedroom" or "office-desktop"
+```
+
+**4. Bring up a pool for one repo:**
+```bash
+./pools.sh up myrepo owner/myrepo 2
+```
+
+**5. Confirm it actually registered** -- a started container is not the same fact as an online runner:
+```bash
+./pools.sh list
+```
+
+Done. Now [point a workflow at it](#point-a-workflow-at-it).
+
+Running several pools, or a second machine? `startRunners.sh`, `discoverPools.sh` and the
+[Several machines](#several-machines) section below cover that in one command instead of one
+`pools.sh up` per repo.
+
 ## Why this exists
 
 These repos are private, and their GitHub-hosted Actions minutes are exhausted. Every workflow run failed in a few seconds with no logs, on the default branch as well as on branches. The annotation on the check run says:
@@ -88,6 +160,15 @@ in `docker ps` but registered nothing.
 You need the PAT described next.
 
 ## Host prerequisites
+
+Checklist first, story below for whichever line actually bites:
+
+- [ ] **Docker** installed, engine set to start on login
+- [ ] Enough memory allocated in Docker Desktop for however many containers you run
+- [ ] **Sleep disabled** on this host while it serves runners (both idle timeout and lid-close --
+  see below, this one is sneaky)
+- [ ] **GitHub CLI** installed and authenticated
+- [ ] On Windows, scripts are invoked via Git Bash, not raw `bash` (which may silently be WSL)
 
 The pool is only as reliable as the machine under it, and two of these are the
 kind of thing you debug for an afternoon before suspecting them.
@@ -187,7 +268,6 @@ Registering a runner by hand, without any of the tooling in this repo, is
 Everything below is the same registration, done by `entrypoint.sh` inside a
 disposable container instead of by hand on a long-lived machine.
 
-
 **GitHub CLI.** pools.sh, startRunners.sh/stopRunners.sh and discoverPools.sh
 all shell out to gh on the host to list repos and check which runners are
 actually online -- a separate installation from the gh baked into the runner
@@ -217,6 +297,7 @@ Without it, these scripts fail fast with `gh: command not found` rather than
 silently doing nothing -- but on Windows that error can end up wherever
 stderr goes for whatever launched bash, so it is easy to miss if you are not
 looking for it.
+
 ## Setup
 
 You need a personal access token that can register runners:
@@ -225,6 +306,8 @@ You need a personal access token that can register runners:
 - **Fine-grained PAT** — the target repositories, `Administration: read & write`
 
 One PAT covering several repositories can serve several pools. The container exchanges it for a short-lived registration token at start-up; the PAT itself is never baked into the image.
+
+[Quick start](#quick-start) already walked through this via `pools.sh` -- what follows is the same thing one level down, with the raw `docker compose` command `pools.sh up` runs for you, for when something needs debugging directly.
 
 ```bash
 git clone https://github.com/leonarduk/local-github-runner
@@ -247,7 +330,6 @@ The runner then appears under the repo's **Settings → Actions → Runners** as
 
 `GITHUB_REPOSITORY` has no default and the `up` fails without it. That is deliberate: it used to default to the one repo this was written for, which is exactly the kind of thing that survives a copy to a new machine and quietly registers runners against the wrong repository.
 
-
 ### Check the pool is really up
 
 `docker compose up` returning 0 means the containers started, not that any
@@ -257,7 +339,8 @@ fail on its own -- a PAT without the right scope, a typo in
 restart forever while GitHub shows nothing. Ask GitHub rather than Docker:
 
 ```bash
-gh api repos/OWNER/REPO/actions/runners \n  --jq '.runners[] | "\(.name)  \(.status)  busy=\(.busy)"'
+gh api repos/OWNER/REPO/actions/runners \
+  --jq '.runners[] | "\(.name)  \(.status)  busy=\(.busy)"'
 ```
 
 Expect one `online` line per container, each prefixed with the host label from
