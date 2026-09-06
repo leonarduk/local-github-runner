@@ -1,0 +1,12 @@
+# The Windows pools this host runs. One line per pool: name, owner/repo, count.
+# Same format as pools.conf, deliberately a separate file: a host can serve
+# Linux container pools and native Windows pools side by side, and they are
+# independent fleets with independent lifecycles.
+#
+#   cp windows-pools.conf.example windows-pools.conf   # gitignored, edit freely
+#
+# <name> becomes the folder windows\runners\<name>; it does not have to
+# match the repo. <count> is how many runner processes ./windows-startRunners.ps1
+# brings up.
+
+jobtrack   leonarduk/jobtrack   2

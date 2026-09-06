@@ -141,9 +141,13 @@ If you need something else, use something else:
   which is the supported answer and does all of that properly.
 - **A public repository** -> nothing here, and see the next section. This is
   not a limitation to work around; it is the one hard rule.
-- **Windows or macOS jobs** -> these runners are Linux containers only.
+- **macOS jobs** -> not covered by anything in this repo.
 - **Jobs needing `container:`, `services:`, or Docker-based actions** -> those
   need Docker-in-Docker, which this deliberately does not provide.
+
+**Windows jobs** are covered, just not by a container: see
+[windows/README.md](windows/README.md) for ephemeral runners as plain Windows
+processes instead.
 
 ## ⚠️ Private repositories only
 
@@ -438,6 +442,8 @@ A runner sits idle until a job asks for it. In the target repo's workflow:
 
 Every job in the workflow needs the label, or the untouched ones keep exhausting the account's Actions minutes as before. Keep the `ubuntu-latest` line commented directly above each replacement, so reverting to hosted runners is a one-line edit at the point of use rather than an archaeology exercise.
 
+Running the same tests on Windows instead (or as well)? [windows/README.md](windows/README.md) covers `runs-on: [self-hosted, windows, x64]`, set up the same way but without a container.
+
 **Last verified:** 2026-09-05. Re-run and update this date when making changes that could affect runner behavior.
 
 Verified end to end against `leonarduk/spring-professional-udemy-practice-tests`: both its jobs ran on a pool from this image and passed, in 7s and 32s, having previously failed in about 2s without starting.
@@ -492,7 +498,7 @@ That relies on `entrypoint.sh` signalling `Runner.Listener` directly rather than
 - **`actions/cache` has no backing store**, so cache steps are no-ops that cost a little time. Worth knowing if a workflow starts depending on a warm cache.
 - **`pip install` only works after `actions/setup-python`.** The base is Ubuntu 24.04, whose system interpreter refuses installs under PEP 668 (`externally-managed-environment`). `setup-python` puts its own interpreter on PATH first — but a workflow that drops that step keeps working on a GitHub-hosted runner and fails here.
 - **`mem_limit: 1g` / `pids_limit: 512`** are conservative. If a build is OOM-killed, raise them rather than removing them.
-- **Linux only.** A workflow pinned to `windows-*` or `macos-*` will never match these runners.
+- **This container image is Linux only.** A workflow pinned to `windows-*` will never match it -- see [windows/README.md](windows/README.md) for the separate, non-containerised path that does. `macos-*` is not covered by anything in this repo.
 - **Pool names use the repo name, not `owner/repo`.** Two repos of the same name under different owners would collide.
 
 ## Further reading

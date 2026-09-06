@@ -4,4 +4,6 @@ pat.secret
 .idea
 _work/
 pools.conf
+windows-pools.conf
+windows/runners/
 /.issue-worm/
