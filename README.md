@@ -1,6 +1,16 @@
 # local-github-runner
 
+## WHAT
+
 Ephemeral, containerised, self-hosted GitHub Actions runners for private repositories. One checkout runs a pool per repository, on as many machines as you like.
+
+## WHY
+
+As I have a lot of private repos, and although you have some free action runner minutes for private repos, unlimited for free repos,  I burn through them quickly.  You can "self-host" runners and GitHub will trigger them.
+
+## HOW 
+
+See below
 
 **[Quick start](#quick-start)** -- if you just want it running, start there.
 
