@@ -63,7 +63,9 @@ switch ($Command) {
             $online = '?'
             if ($repo -ne 'unknown' -and (Get-Command gh -ErrorAction SilentlyContinue)) {
                 try {
-                    $online = (gh api "repos/$repo/actions/runners" --jq '[.runners[] | select(.status=="online" and (.labels[].name=="windows"))] | length' 2>$null)
+                    # GitHub capitalises label names on the way back ("Windows", not
+                    # "windows" as passed to --labels), so match case-insensitively.
+                    $online = (gh api "repos/$repo/actions/runners" --jq '[.runners[] | select(.status=="online" and ([.labels[].name] | map(ascii_downcase) | index("windows")))] | length' 2>$null)
                     if (-not $online) { $online = '0' }
                 } catch { $online = '?' }
             }
