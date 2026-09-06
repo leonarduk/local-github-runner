@@ -8,3 +8,12 @@
 # The Dockerfile is covered for the same reason -- a CRLF line continuation
 # silently changes what the shell in a RUN step receives.
 * text eol=lf
+
+# Images are binary -- the LF rule above must never touch them. Without this,
+# git "normalizes" PNG line endings the same way it does shell scripts, which
+# corrupts the file: PNG's own magic bytes contain a CRLF specifically so this
+# class of mistake is detectable, and it was made here once already.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
