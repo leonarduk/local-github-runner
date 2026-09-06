@@ -13,6 +13,10 @@
 
 FROM ubuntu:24.04
 
+# So that a failure partway through a piped RUN command (e.g. `curl | sha256sum -c`)
+# fails the build instead of being masked by the pipe's last exit status.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 # Pinned deliberately. A runner auto-updates itself at job start unless
 # --disableupdate is passed, so this is the floor rather than a hard ceiling
 # -- but pinning keeps `docker build` reproducible and makes the checksum
@@ -53,6 +57,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # uuid-runtime provides uuidgen, which workflows use to generate unique
 # heredoc delimiters when writing multi-line values to $GITHUB_OUTPUT. It is
 # present on a GitHub-hosted ubuntu-latest and absent from ubuntu:24.04.
+# Versions intentionally unpinned: these come from Ubuntu's rolling package
+# mirror, and a version pinned today is routinely gone from the mirror by the
+# time this image is rebuilt, breaking the build instead of reproducing it.
+# hadolint ignore=DL3008
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -124,6 +132,7 @@ ARG GH_VERSION=2.100.0
 ARG GH_SHA256_AMD64=e4d4bb4498e8d007abe545b6568926793ace1b6447da598294a610018cb164be
 ARG GH_SHA256_ARM64=ea4e7a581a32ccad6cc7923cb1576ac5859ba4b9a16ab22eb8f8a96e78e2e961
 
+WORKDIR /tmp
 RUN set -eux; \
     case "${TARGETARCH}" in \
       amd64) sha="${GH_SHA256_AMD64}" ;; \
@@ -132,7 +141,6 @@ RUN set -eux; \
     esac; \
     dir="gh_${GH_VERSION}_linux_${TARGETARCH}"; \
     url="https://github.com/cli/cli/releases/download/v${GH_VERSION}/${dir}.tar.gz"; \
-    cd /tmp; \
     curl -fsSL --retry 5 --retry-delay 5 -o gh.tar.gz "${url}"; \
     echo "${sha}  gh.tar.gz" | sha256sum -c -; \
     tar xzf gh.tar.gz; \
@@ -160,7 +168,6 @@ ARG MAVEN_VERSION=3.9.16
 ARG MAVEN_SHA512=831a8591fe20c8243b1dbe7d71e3244f31d1665b0804b2e825e38cbbe5ce0cafb8338851f90780735568773e0a6cd07bbec107cda0b896b008b861075358b6f6
 
 RUN set -eux;\
-    cd /tmp;\
     url="https://dlcdn.apache.org/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz";\
     curl -fsSL --retry 5 --retry-delay 5 -o maven.tar.gz "${url}";\
     echo "${MAVEN_SHA512}  maven.tar.gz" | sha512sum -c -;\
