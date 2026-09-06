@@ -57,6 +57,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # uuid-runtime provides uuidgen, which workflows use to generate unique
 # heredoc delimiters when writing multi-line values to $GITHUB_OUTPUT. It is
 # present on a GitHub-hosted ubuntu-latest and absent from ubuntu:24.04.
+#
+# shellcheck and gnupg close two more GitHub-hosted-vs-here gaps: shellcheck
+# ships preinstalled on ubuntu-latest, so workflows call it bare with no
+# install step and fail here with "command not found" otherwise. gnupg
+# provides `gpg`, which codecov-action shells out to (to verify its uploader
+# signature) and which ubuntu-latest also carries by default.
+#
 # Versions intentionally unpinned: these come from Ubuntu's rolling package
 # mirror, and a version pinned today is routinely gone from the mirror by the
 # time this image is rebuilt, breaking the build instead of reproducing it.
@@ -66,8 +73,10 @@ RUN apt-get update \
         ca-certificates \
         curl \
         git \
+        gnupg \
         jq \
         procps \
+        shellcheck \
         sudo \
         tar \
         unzip \
