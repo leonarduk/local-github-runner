@@ -3,3 +3,4 @@ pat.secret
 .env
 _work/
 pools.conf
+/.issue-worm/
