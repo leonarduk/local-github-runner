@@ -42,7 +42,15 @@ git clone https://github.com/leonarduk/local-github-runner
 cd local-github-runner
 ```
 
-**2. Save your PAT -- gitignored, never committed:**
+**2. Get a token, and save it -- gitignored, never committed:**
+
+A PAT (personal access token) is how the container proves to GitHub it is
+allowed to register itself as a runner -- there is no other way to authorize
+this from outside a browser. Create one at
+[github.com/settings/tokens/new](https://github.com/settings/tokens/new):
+give it a name, tick the **`repo`** scope checkbox, and click **Generate token**.
+Copy the value it shows you -- GitHub only displays it this once.
+
 ```bash
 # macOS / Linux / Git Bash
 printf '%s' 'ghp_your_token_here' > pat.secret
