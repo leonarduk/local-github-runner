@@ -26,10 +26,11 @@ Ephemeral, containerised, self-hosted GitHub Actions runners for private reposit
 
 ## Quick start
 
-**Before you start, once per machine:**
+**Install once per machine, before starting:**
 - [Docker Desktop](https://docs.docker.com/get-started/introduction/get-docker-desktop/) (or [Docker Engine](https://docs.docker.com/engine/install/) on Linux), set to start on login
 - [GitHub CLI](https://cli.github.com), authenticated -- `gh auth login`
-- A classic personal access token with `repo` scope (Setup below explains the fine-grained alternative)
+
+The GitHub token comes later, at step 2 below -- there's nothing to prepare for it in advance.
 
 **Windows:** run every command below through Git Bash, not raw PowerShell, and not
 bare `bash` -- see [Host prerequisites](#host-prerequisites) if a command below says
