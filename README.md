@@ -4,13 +4,13 @@ Ephemeral, containerised, self-hosted GitHub Actions runners for private reposit
 
 ## Why this exists
 
-These repos are private, and their GitHub-hosted Actions minutes are exhausted. Every workflow run failed in a few seconds with no logs, on the default branch as well as on branches. The annotation on the check run says:
+These repos moved from all-public to an open-core split: the framework and plumbing stay public, the parts worth something move to private repos, either to sell directly or at least to stop someone else forking public work and profiting from it before the author does.
 
-> The job was not started because recent account payments have failed or your spending limit needs to be increased.
+GitHub-hosted Actions minutes are metered per account, not per repo, so that split had a cost nothing about it made obvious upfront: every new private repo adds its own CI, and the minutes compound rather than add. The free tier was gone by day 20 of the month; GitHub Pro's larger allotment was gone by day 5. Paying more moved the wall, it didn't remove it.
 
-The jobs never start, so a red CI says nothing about the code. Self-hosted runners do not consume Actions minutes, so this gets the signal back without waiting on a billing change. Sorting the billing out is still the better long-term fix — this is a way to keep working meanwhile.
+[Self-hosted runners are free to use with GitHub Actions](https://docs.github.com/en/billing/concepts/product-billing/github-actions#free-use-of-github-actions): you supply and maintain the machine, and none of that time counts against Actions minutes. That's the actual fix here — not a workaround for an outage, but a way to stop paying GitHub for compute already sitting idle on a machine at home.
 
-It began inside one repo, as a fix for that repo's dead CI, and was pointed at four more within a day. It lives here because a tool that serves five repositories should not be a subdirectory of the first one that needed it.
+It began inside one repo, as a fix for that repo's minutes problem, and was pointed at four more within a day. It lives here because a tool that serves five repositories should not be a subdirectory of the first one that needed it.
 
 ## What this is not
 
@@ -99,8 +99,8 @@ bind mounts this uses.
 Set the engine to **start on login** — Docker Desktop → *Settings* → *General* →
 *Start Docker Desktop when you sign in*. `restart: always` brings a pool back
 after a reboot, but only once the engine is running. Without it the jobs simply
-queue with no runner, which looks exactly like the billing failure this exists
-to work around.
+queue with no runner, which looks like CI is broken rather than a stopped
+Docker engine.
 
 Give it enough memory. Each runner declares `mem_limit: 2g`, so *N* runners
 across all your pools can ask for 2*N* GiB, against whatever ceiling Docker
@@ -273,7 +273,7 @@ A runner sits idle until a job asks for it. In the target repo's workflow:
 +    runs-on: [self-hosted, linux, x64]
 ```
 
-Every job in the workflow needs the label, or the untouched ones keep failing to start for the original reason. Keep the `ubuntu-latest` line commented directly above each replacement, so going back once billing is sorted is a one-line edit at the point of use rather than an archaeology exercise.
+Every job in the workflow needs the label, or the untouched ones keep exhausting the account's Actions minutes as before. Keep the `ubuntu-latest` line commented directly above each replacement, so reverting to hosted runners is a one-line edit at the point of use rather than an archaeology exercise.
 
 Verified end to end on 2026-09-05 against `leonarduk/spring-professional-udemy-practice-tests`: both its jobs ran on a pool from this image and passed, in 7s and 32s, having previously failed in about 2s without starting.
 
