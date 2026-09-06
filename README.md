@@ -90,6 +90,12 @@ host look like:
 
 ![Several gh-runner-* compose projects, each expandable to its runner containers, in Docker Desktop](docs/pools-in-docker-desktop.png)
 
+GitHub's own **Settings -> Actions -> Runners** page on the target repo is the
+other side of the same check -- each container above is one row here, `Idle`
+once it has registered:
+
+![Settings -> Actions -> Runners for one repo, showing self-hosted Linux X64 runners, all Idle](docs/runners-on-github.png)
+
 **6. Point a workflow at it.** A runner sits idle until a job asks for it --
 edit the target repo's workflow file:
 
@@ -417,9 +423,7 @@ Nothing is host-specific except two gitignored files, so a second machine is a c
 
 `RUNNER_HOST_LABEL` becomes both a runner label and the runner-name prefix, so the GitHub runner list and `gh api .../actions/runners` say which box a runner is on — container hostnames are random hex and no help. It also lets a workflow pin a job to one machine with `runs-on: [self-hosted, bedroom]`.
 
-Runners on different machines serving the same repo simply join the same pool: GitHub hands each queued job to whichever is free. There is no coordination between hosts and none is needed. Two machines, `bedroom` and `steves-big-laptop`, both serving `cicaid-pro`:
-
-![Settings -> Actions -> Runners for one repo, showing two runners each from bedroom and steves-big-laptop, all Idle](docs/runners-on-github.png)
+Runners on different machines serving the same repo simply join the same pool: GitHub hands each queued job to whichever is free. There is no coordination between hosts and none is needed -- the screenshot in [Quick start](#quick-start) step 5 is one repo with runners from two machines, `bedroom` and `steves-big-laptop`, sitting in the same list.
 
 The image is built per machine (`--build`). There is no registry involved, so a second host costs one ~1.4GB build rather than any shared infrastructure.
 
