@@ -63,7 +63,9 @@ cp .env.example .env
 ```bash
 cp pools.conf.example pools.conf
 # edit pools.conf -- replace its example lines with your own, one per repo:
-#   myrepo   owner/myrepo   2
+#   jobtrack   owner/jobtrack   2
+# "owner" is your GitHub username or org, not a literal word -- for the
+# author that's "leonarduk", e.g. leonarduk/jobtrack; use your own instead.
 ./startRunners.sh
 ```
 
