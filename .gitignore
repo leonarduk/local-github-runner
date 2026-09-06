@@ -1,6 +1,7 @@
 pat.secret
 *.secret
 .env
+.idea
 _work/
 pools.conf
 /.issue-worm/
