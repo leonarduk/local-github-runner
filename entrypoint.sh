@@ -78,6 +78,7 @@ deregister() {
 }
 
 RUNNER_PID=""
+# shellcheck disable=SC2329 # invoked indirectly via `trap` below
 forward_signal() {
     if [[ -n "${RUNNER_PID}" ]]; then
         log "forwarding termination to run.sh (pid ${RUNNER_PID})"
