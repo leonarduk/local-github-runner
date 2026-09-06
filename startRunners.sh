@@ -7,7 +7,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 conf="pools.conf"
 [[ -f "$conf" ]] || { echo "no $conf -- cp pools.conf.example $conf and edit it" >&2; exit 1; }
 
-while read -r name repo count; do
+while read -r name repo count || [[ -n ${name:-} ]]; do
   [[ -z "$name" || "$name" == \#* ]] && continue
   echo "== $name ($repo, x$count) =="
   ./pools.sh up "$name" "$repo" "$count"
