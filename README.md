@@ -59,9 +59,12 @@ cp .env.example .env
 # then edit .env and set RUNNER_HOST_LABEL to something like "bedroom" or "office-desktop"
 ```
 
-**4. Bring up a pool for one repo:**
+**4. List the repo(s) this machine should serve, and bring them up:**
 ```bash
-./pools.sh up myrepo owner/myrepo 2
+cp pools.conf.example pools.conf
+# edit pools.conf -- replace its example lines with your own, one per repo:
+#   myrepo   owner/myrepo   2
+./startRunners.sh
 ```
 
 **5. Confirm it actually registered** -- a started container is not the same fact as an online runner:
@@ -71,9 +74,11 @@ cp .env.example .env
 
 Done. Now [point a workflow at it](#point-a-workflow-at-it).
 
-Running several pools, or a second machine? `startRunners.sh`, `discoverPools.sh` and the
-[Several machines](#several-machines) section below cover that in one command instead of one
-`pools.sh up` per repo.
+Adding a repo later means adding a line to `pools.conf` and running
+`./startRunners.sh` again. `./pools.sh up <name> <owner/repo> [count]` is the
+one-off primitive underneath it, for a single pool with no config file at all.
+Setting up a second machine, or want repos to opt themselves in instead of
+being listed here by hand? See [Several machines](#several-machines).
 
 ## Why this exists
 
