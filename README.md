@@ -199,6 +199,20 @@ winget install --id GitHub.cli   # Windows; see https://cli.github.com for other
 gh auth login                    # in a new shell, so PATH picks up the install
 ```
 
+On Windows, invoke every script here with an explicit path to Git Bash rather
+than bare `bash` -- if WSL is installed (likely, since Docker Desktop's
+recommended backend needs it), `bash` on PATH resolves to
+`C:\WINDOWS\system32\bash.exe`, WSL's launcher into a separate Linux
+environment with its own PATH. gh installed on Windows via winget is
+invisible there, so a script fails with a plain `gh: command not found` that
+has nothing to do with whether gh is actually installed. Confirm which one
+`bash` means with `Get-Command bash`, and if it points into
+`system32` or `WindowsApps`, use the real path instead:
+
+```powershell
+& 'C:\Program Files\Git\bin\bash.exe' ./discoverPools.sh leonarduk
+```
+
 Without it, these scripts fail fast with `gh: command not found` rather than
 silently doing nothing -- but on Windows that error can end up wherever
 stderr goes for whatever launched bash, so it is easy to miss if you are not
