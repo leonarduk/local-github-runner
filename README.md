@@ -275,7 +275,9 @@ A runner sits idle until a job asks for it. In the target repo's workflow:
 
 Every job in the workflow needs the label, or the untouched ones keep exhausting the account's Actions minutes as before. Keep the `ubuntu-latest` line commented directly above each replacement, so reverting to hosted runners is a one-line edit at the point of use rather than an archaeology exercise.
 
-Verified end to end on 2026-09-05 against `leonarduk/spring-professional-udemy-practice-tests`: both its jobs ran on a pool from this image and passed, in 7s and 32s, having previously failed in about 2s without starting.
+**Last verified:** 2026-09-05. Re-run and update this date when making changes that could affect runner behavior.
+
+Verified end to end against `leonarduk/spring-professional-udemy-practice-tests`: both its jobs ran on a pool from this image and passed, in 7s and 32s, having previously failed in about 2s without starting.
 
 GitHub's own reference for this syntax and the default label set is
 [Choosing the runner for a job](https://docs.github.com/actions/using-jobs/choosing-the-runner-for-a-job).
