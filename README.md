@@ -369,6 +369,10 @@ GITHUB_REPOSITORY=leonarduk/jobtrack COMPOSE_PROJECT_NAME=gh-runner-jobtrack doc
 Only put per-machine facts in `.env` — `RUNNER_HOST_LABEL`, and `GITHUB_REPOSITORY` if this host serves exactly one repo. Every pool started from this directory reads that same file, so anything that differs per pool belongs on the command line.
 
 Check what is running, across all pools, with `docker ps --filter name=gh-runner`.
+Docker Desktop groups them the same way, by compose project -- each expandable
+row below is one pool, `runner-1`/`runner-2` its containers:
+
+![Several gh-runner-* compose projects, each expandable to its runner containers, in Docker Desktop](docs/pools-in-docker-desktop.png)
 
 ## Several machines
 
@@ -385,7 +389,9 @@ Nothing is host-specific except two gitignored files, so a second machine is a c
 
 `RUNNER_HOST_LABEL` becomes both a runner label and the runner-name prefix, so the GitHub runner list and `gh api .../actions/runners` say which box a runner is on — container hostnames are random hex and no help. It also lets a workflow pin a job to one machine with `runs-on: [self-hosted, bedroom]`.
 
-Runners on different machines serving the same repo simply join the same pool: GitHub hands each queued job to whichever is free. There is no coordination between hosts and none is needed.
+Runners on different machines serving the same repo simply join the same pool: GitHub hands each queued job to whichever is free. There is no coordination between hosts and none is needed. Two machines, `bedroom` and `steves-big-laptop`, both serving `cicaid-pro`:
+
+![Settings -> Actions -> Runners for one repo, showing two runners each from bedroom and steves-big-laptop, all Idle](docs/runners-on-github.png)
 
 The image is built per machine (`--build`). There is no registry involved, so a second host costs one ~1.4GB build rather than any shared infrastructure.
 
