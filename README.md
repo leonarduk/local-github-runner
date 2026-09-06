@@ -102,8 +102,8 @@ after a reboot, but only once the engine is running. Without it the jobs simply
 queue with no runner, which looks exactly like the billing failure this exists
 to work around.
 
-Give it enough memory. Each runner declares `mem_limit: 2g`, so *N* runners
-across all your pools can ask for 2*N* GiB, against whatever ceiling Docker
+Give it enough memory. Each runner declares `mem_limit: 1g`, so *N* runners
+across all your pools can ask for *N* GiB, against whatever ceiling Docker
 Desktop is set to in *Settings* → *Resources*. Over-committing does not error —
 it shows up as jobs mysteriously crawling when several repos build at once.
 Count the containers, not the pools.
@@ -187,6 +187,22 @@ Registering a runner by hand, without any of the tooling in this repo, is
 Everything below is the same registration, done by `entrypoint.sh` inside a
 disposable container instead of by hand on a long-lived machine.
 
+
+**GitHub CLI.** pools.sh, startRunners.sh/stopRunners.sh and discoverPools.sh
+all shell out to gh on the host to list repos and check which runners are
+actually online -- a separate installation from the gh baked into the runner
+container, which only helps workflows running inside a job. Install it and
+authenticate before using any of these scripts:
+
+```powershell
+winget install --id GitHub.cli   # Windows; see https://cli.github.com for other platforms
+gh auth login                    # in a new shell, so PATH picks up the install
+```
+
+Without it, these scripts fail fast with `gh: command not found` rather than
+silently doing nothing -- but on Windows that error can end up wherever
+stderr goes for whatever launched bash, so it is easy to miss if you are not
+looking for it.
 ## Setup
 
 You need a personal access token that can register runners:
@@ -330,7 +346,7 @@ That relies on `entrypoint.sh` signalling `Runner.Listener` directly rather than
 - **No Docker-in-Docker.** Adding it means mounting the host's Docker socket, which hands any job root on the host — do not do that on the strength of this README alone.
 - **`actions/cache` has no backing store**, so cache steps are no-ops that cost a little time. Worth knowing if a workflow starts depending on a warm cache.
 - **`pip install` only works after `actions/setup-python`.** The base is Ubuntu 24.04, whose system interpreter refuses installs under PEP 668 (`externally-managed-environment`). `setup-python` puts its own interpreter on PATH first — but a workflow that drops that step keeps working on a GitHub-hosted runner and fails here.
-- **`mem_limit: 2g` / `pids_limit: 512`** are conservative. If a build is OOM-killed, raise them rather than removing them.
+- **`mem_limit: 1g` / `pids_limit: 512`** are conservative. If a build is OOM-killed, raise them rather than removing them.
 - **Linux only.** A workflow pinned to `windows-*` or `macos-*` will never match these runners.
 - **Pool names use the repo name, not `owner/repo`.** Two repos of the same name under different owners would collide.
 
