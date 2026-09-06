@@ -179,6 +179,13 @@ RUN set -eux;\
 COPY --chown=runner:runner entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
+# The gh/Maven installs above left WORKDIR at /tmp. entrypoint.sh invokes
+# ./config.sh and ./run.sh with relative paths, so it needs to start in the
+# directory those actually live in -- without this, every container fails
+# immediately with "./config.sh: No such file or directory" and crash-loops
+# forever without ever registering as a runner.
+WORKDIR /home/runner/actions-runner
+
 USER runner
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
