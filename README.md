@@ -74,7 +74,26 @@ cp pools.conf.example pools.conf
 ./pools.sh list
 ```
 
-Done. Now [point a workflow at it](#point-a-workflow-at-it).
+Docker Desktop shows the same pools grouped by project, each expandable to its
+`runner-1`/`runner-2` containers -- this is what several healthy pools on one
+host look like:
+
+![Several gh-runner-* compose projects, each expandable to its runner containers, in Docker Desktop](docs/pools-in-docker-desktop.png)
+
+**6. Point a workflow at it.** A runner sits idle until a job asks for it --
+edit the target repo's workflow file:
+
+```yaml
+-    runs-on: ubuntu-latest
++    runs-on: [self-hosted, linux, x64]
+```
+
+Every job in that workflow needs the label, or the untouched ones keep failing
+to start for the original reason. See [Point a workflow at it](#point-a-workflow-at-it)
+for the full version of this step, including why to keep the old line
+commented rather than deleted.
+
+Done.
 
 Adding a repo later means adding a line to `pools.conf` and running
 `./startRunners.sh` again. `./pools.sh up <name> <owner/repo> [count]` is the
@@ -370,9 +389,8 @@ Only put per-machine facts in `.env` — `RUNNER_HOST_LABEL`, and `GITHUB_REPOSI
 
 Check what is running, across all pools, with `docker ps --filter name=gh-runner`.
 Docker Desktop groups them the same way, by compose project -- each expandable
-row below is one pool, `runner-1`/`runner-2` its containers:
-
-![Several gh-runner-* compose projects, each expandable to its runner containers, in Docker Desktop](docs/pools-in-docker-desktop.png)
+row is one pool, `runner-1`/`runner-2` its containers (see the screenshot in
+[Quick start](#quick-start) step 5).
 
 ## Several machines
 
