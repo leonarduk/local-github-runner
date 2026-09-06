@@ -11,4 +11,4 @@ while read -r name repo count || [[ -n ${name:-} ]]; do
   [[ -z "$name" || "$name" == \#* ]] && continue
   echo "== $name =="
   ./pools.sh down "$name"
-done < "$conf"
+done < <(tr -d '\r' < "$conf")
