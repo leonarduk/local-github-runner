@@ -256,7 +256,11 @@ Nothing is host-specific except two gitignored files, so a second machine is a c
 1. `git clone` this repo.
 2. Write the PAT to `pat.secret` — it never travels through git.
 3. `cp .env.example .env` and set `RUNNER_HOST_LABEL` to that machine's name, e.g. `bedroom`.
-4. Bring up whichever pools that machine should serve: `./pools.sh up <name> <owner/repo> [count]` per repo.
+4. Bring up whichever pools that machine should serve. Two ways:
+   - `cp pools.conf.example pools.conf`, edit it to list the repos this host serves, then `./startRunners.sh`.
+   - Or `./discoverPools.sh <owner>`, which needs no local config at all -- it finds every private repo
+     under `<owner>` carrying a `.local_runner` marker file and brings each one up.
+   Either way, `./pools.sh up <name> <owner/repo> [count]` remains the one-off, no-config primitive underneath both.
 
 `RUNNER_HOST_LABEL` becomes both a runner label and the runner-name prefix, so the GitHub runner list and `gh api .../actions/runners` say which box a runner is on — container hostnames are random hex and no help. It also lets a workflow pin a job to one machine with `runs-on: [self-hosted, bedroom]`.
 
