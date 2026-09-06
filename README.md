@@ -26,11 +26,10 @@ Ephemeral, containerised, self-hosted GitHub Actions runners for private reposit
 
 ## Quick start
 
-**Install once per machine, before starting:**
+**Have these three ready before starting:**
 - [Docker Desktop](https://docs.docker.com/get-started/introduction/get-docker-desktop/) (or [Docker Engine](https://docs.docker.com/engine/install/) on Linux), set to start on login
 - [GitHub CLI](https://cli.github.com), authenticated -- `gh auth login`
-
-The GitHub token comes later, at step 2 below -- there's nothing to prepare for it in advance.
+- A GitHub personal access token (PAT) -- create one at [github.com/settings/tokens/new](https://github.com/settings/tokens/new): give it a name, tick the **`repo`** scope checkbox, click **Generate token**, and copy the value it shows you. GitHub only displays it this once.
 
 **Windows:** run every command below through Git Bash, not raw PowerShell, and not
 bare `bash` -- see [Host prerequisites](#host-prerequisites) if a command below says
@@ -43,14 +42,7 @@ git clone https://github.com/leonarduk/local-github-runner
 cd local-github-runner
 ```
 
-**2. Get a token, and save it -- gitignored, never committed:**
-
-A PAT (personal access token) is how the container proves to GitHub it is
-allowed to register itself as a runner -- there is no other way to authorize
-this from outside a browser. Create one at
-[github.com/settings/tokens/new](https://github.com/settings/tokens/new):
-give it a name, tick the **`repo`** scope checkbox, and click **Generate token**.
-Copy the value it shows you -- GitHub only displays it this once.
+**2. Save the PAT from above -- gitignored, never committed:**
 
 ```bash
 # macOS / Linux / Git Bash
