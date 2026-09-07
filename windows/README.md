@@ -148,6 +148,7 @@ Tear a pool down:
 |---|---|
 | `Install-Runner.ps1` | Downloads, SHA256-verifies, and unpacks the runner zip into a slot directory. Run automatically by `Start-RunnerPool.ps1`; call it directly only to pre-stage a slot or bump the version. |
 | `Install-PythonToolCache.ps1` | Downloads, SHA256-verifies, and per-user-installs one Python version into `windows\toolcache\`, the shared, persistent tool cache `Start-RunnerPool.ps1` points `RUNNER_TOOL_CACHE`/`AGENT_TOOLSDIRECTORY` at. Not run automatically -- see "Language runtimes" below. |
+| `Install-NodeToolCache.ps1` | Same idea, for Node: downloads, SHA256-verifies (against Node's own published `SHASUMS256.txt`), and unpacks one Node version into the same tool cache. Not run automatically. |
 | `runner-loop.ps1` | The actual ephemeral loop: mint a registration token, `config.cmd`, `run.cmd`, deregister, repeat. One process per slot. The Windows analogue of `entrypoint.sh`. |
 | `Start-RunnerPool.ps1` | Brings up `-Count` slots for one repo as hidden background processes, logging to `windows\runners\<name>\logs\`. The Windows analogue of `pools.sh up`. |
 | `Stop-RunnerPool.ps1` | Signals slots to stop via a stop-file, waits, optionally force-kills. The Windows analogue of `pools.sh down`. |
@@ -176,16 +177,45 @@ persistent directory outside any slot's ephemeral `_work` (which gets wiped
 every job). Pre-populate it once per runtime/version a workflow needs:
 
 ```powershell
-.\windows\Install-PythonToolCache.ps1                              # Python 3.11.9, x64
-.\windows\Install-PythonToolCache.ps1 -Version 3.12.7 -Arch x64
+# Python: default version (3.11.9) has a pinned checksum baked in; any other
+# version needs -Sha256 explicitly -- see the script's own header for why.
+.\windows\Install-PythonToolCache.ps1
+.\windows\Install-PythonToolCache.ps1 -Version 3.12.10 -Sha256 67B5635E80EA51072B87941312D00EC8927C4DB9BA18938F7AD2D27B328B95FB
+
+# Node: -Sha256 is always required, copied from that release's own
+# https://nodejs.org/dist/<version>/SHASUMS256.txt.
+.\windows\Install-NodeToolCache.ps1 -Version v22.23.2 -Sha256 1177B4137BA5ADAA56354AE40F1080C7450E8AE09CECB47DA459D1C52AC99F97
+.\windows\Install-NodeToolCache.ps1 -Version v24.20.0 -Sha256 6CAC9FFBCA8F6A47091E4B5C772E0606049C3871CB67D900C0CEDDE630E545BA
 ```
 
-A workflow asking for `python-version: "3.11"` matches any cached `3.11.z`
-via `actions/setup-python`'s semver range check, so one patch release per
-minor version is enough -- it does not need to track the newest patch.
+A workflow asking for `python-version: "3.11"` (or `node-version: "22"`)
+matches any cached `3.11.z` (or `22.y.z`) via `actions/setup-python`'s (or
+`setup-node`'s) semver range check, so one patch release per minor version
+is enough -- it does not need to track the newest patch. `3.12.10` above is
+deliberately not the newest `3.12.z`: python.org stops publishing Windows
+installers once a branch moves to source-only security releases, so this is
+the newest `3.12.z` that still has one.
+
 `windows\toolcache\` is gitignored and disposable like `windows\runners\`,
-just longer-lived: rerunning the install script is a no-op once a version is
-cached (`-Force` to reinstall).
+just longer-lived: rerunning either install script is a no-op once that
+version is cached (`-Force` to reinstall).
+
+Versions currently worth caching, from what each repo's workflows actually
+pin (`python-version:` / `node-version:` across `.github/workflows/*.yml` in
+each repo) -- recheck if a workflow changes its pin:
+
+| Repo | Python | Node |
+|---|---|---|
+| cicaid-pro | 3.11, 3.12 | -- |
+| issue-worm-pro | 3.11, 3.12 | -- |
+| jobtrack | 3.11, 3.12 | 22, 24 |
+
+None of jobtrack's or issue-worm-pro's workflows run on `[self-hosted,
+windows, x64]` today -- both are Linux-only, even though their pools exist
+in `windows-pools.conf`. Caching these ahead of time just means the first
+Windows job either repo ever adds won't hit the cache-miss failure
+cicaid-pro's did (see the "Language runtimes" intro above); it fixes
+nothing currently broken.
 
 ## Runtime state
 
