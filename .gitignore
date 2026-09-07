@@ -8,3 +8,5 @@ windows-pools.conf
 windows/runners/
 windows/toolcache/
 /.issue-worm/
+/.issue-worm-workspace/
+issue_worm_pro-*.whl
