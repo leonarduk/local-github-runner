@@ -6,4 +6,5 @@ _work/
 pools.conf
 windows-pools.conf
 windows/runners/
+windows/toolcache/
 /.issue-worm/

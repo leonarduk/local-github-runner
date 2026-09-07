@@ -27,6 +27,15 @@ if (-not (Test-Path $PatFile)) {
 $poolDir = Join-Path $root "windows\runners\$Name"
 $logDir  = Join-Path $poolDir 'logs'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+
+# Point setup-python/setup-node/etc at a persistent, pre-populated tool
+# cache (see Install-PythonToolCache.ps1) instead of the default location
+# under this slot's own _work, which gets wiped every job. Both var names
+# are set because different actions/toolkit versions read one or the
+# other. Start-Process below inherits this from the current environment.
+$toolCacheDir = Join-Path $root 'windows\toolcache'
+$env:RUNNER_TOOL_CACHE = $toolCacheDir
+$env:AGENT_TOOLSDIRECTORY = $toolCacheDir
 # Remembered so windows-pools.ps1 list can report which repo a pool serves
 # without needing it passed in again, the same way pools.sh list reads
 # GITHUB_REPOSITORY back out of a container's own environment.
