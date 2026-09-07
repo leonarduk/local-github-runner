@@ -65,8 +65,20 @@ for ($i = 1; $i -le $Count; $i++) {
     $labels = "self-hosted,windows,$Arch,$HostLabel"
     $log = Join-Path $logDir "slot-$i.log"
 
+    # Prefer PowerShell 7, but fall back to Windows PowerShell 5.1 rather than
+    # failing outright: `pwsh` is not present on a stock Windows install, and a
+    # missing-executable error here surfaces only as a slot that never starts,
+    # with nothing in its log to say why.
+    #
+    # The fallback is only safe while runner-loop.ps1 stays 5.1-compatible, so
+    # keep it that way: no ternary, no `??`/`?.`, no `&&`/`||` between commands,
+    # no `ConvertFrom-Json -AsHashtable`, no `ForEach-Object -Parallel`. All of
+    # those parse fine under 7 and are syntax errors under 5.1, which would
+    # strand every slot on exactly the hosts this fallback exists to serve.
+    # `[Parser]::ParseFile()` under 5.1 is the cheap way to check after editing.
+    $shell = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell' }
     $psi = @{
-        FilePath     = 'pwsh'
+        FilePath     = $shell
         ArgumentList = @(
             '-NoProfile', '-File', (Join-Path $PSScriptRoot 'runner-loop.ps1'),
             '-RunnerDir', $slot,
