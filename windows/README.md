@@ -147,6 +147,7 @@ Tear a pool down:
 | File | Role |
 |---|---|
 | `Install-Runner.ps1` | Downloads, SHA256-verifies, and unpacks the runner zip into a slot directory. Run automatically by `Start-RunnerPool.ps1`; call it directly only to pre-stage a slot or bump the version. |
+| `Install-PythonToolCache.ps1` | Downloads, SHA256-verifies, and per-user-installs one Python version into `windows\toolcache\`, the shared, persistent tool cache `Start-RunnerPool.ps1` points `RUNNER_TOOL_CACHE`/`AGENT_TOOLSDIRECTORY` at. Not run automatically -- see "Language runtimes" below. |
 | `runner-loop.ps1` | The actual ephemeral loop: mint a registration token, `config.cmd`, `run.cmd`, deregister, repeat. One process per slot. The Windows analogue of `entrypoint.sh`. |
 | `Start-RunnerPool.ps1` | Brings up `-Count` slots for one repo as hidden background processes, logging to `windows\runners\<name>\logs\`. The Windows analogue of `pools.sh up`. |
 | `Stop-RunnerPool.ps1` | Signals slots to stop via a stop-file, waits, optionally force-kills. The Windows analogue of `pools.sh down`. |
@@ -158,6 +159,33 @@ One level up from this directory:
 | `windows-pools.ps1` | `up` / `down` / `reset` / `list`, mirroring `pools.sh` exactly. |
 | `windows-pools.conf` / `.example` | Which repos this host serves natively on Windows, mirroring `pools.conf`. |
 | `windows-startRunners.ps1` / `windows-stopRunners.ps1` | Bring the whole fleet in `windows-pools.conf` up or down at once. |
+
+## Language runtimes (`actions/setup-python` and friends)
+
+On a **cache miss**, `actions/setup-python` (and `setup-node`, `setup-java`)
+tries to download and self-install a runtime, and that self-install assumes
+an elevated process: it writes `HKLM\...\Uninstall` entries and runs the
+official installer expecting admin rights. `runner-loop.ps1` intentionally
+runs unelevated (see "What this does not give you" above), so that install
+fails -- job logs show `Requested registry access is not allowed` followed by
+the installer exe not being found.
+
+The fix is to make sure it's never a cache miss. `Start-RunnerPool.ps1`
+points `RUNNER_TOOL_CACHE`/`AGENT_TOOLSDIRECTORY` at `windows\toolcache\`, a
+persistent directory outside any slot's ephemeral `_work` (which gets wiped
+every job). Pre-populate it once per runtime/version a workflow needs:
+
+```powershell
+.\windows\Install-PythonToolCache.ps1                              # Python 3.11.9, x64
+.\windows\Install-PythonToolCache.ps1 -Version 3.12.7 -Arch x64
+```
+
+A workflow asking for `python-version: "3.11"` matches any cached `3.11.z`
+via `actions/setup-python`'s semver range check, so one patch release per
+minor version is enough -- it does not need to track the newest patch.
+`windows\toolcache\` is gitignored and disposable like `windows\runners\`,
+just longer-lived: rerunning the install script is a no-op once a version is
+cached (`-Force` to reinstall).
 
 ## Runtime state
 
