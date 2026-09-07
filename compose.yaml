@@ -73,7 +73,17 @@ services:
       # host and `gh api .../actions/runners` says which box a runner is on.
       # Container hostnames are random hex, which is useless for telling two
       # machines apart once there is more than one.
-      RUNNER_LABELS: self-hosted,linux,x64,docker,${RUNNER_HOST_LABEL:-unlabelled-host}
+      #
+      # RUNNER_EXTRA_LABELS appends one or more extra labels (comma-separated)
+      # after the standard set, so a pool can be reserved for a specific kind
+      # of job -- e.g. RUNNER_EXTRA_LABELS=issue-worm lets a workflow target
+      # only that pool with `runs-on: [self-hosted, issue-worm]`, keeping it
+      # out of reach of the shared CI pool's `runs-on: [self-hosted, ...]`
+      # jobs. Unset by default, which reproduces today's label set exactly --
+      # no trailing comma, nothing appended. This is a per-pool knob, set via
+      # pools.conf/pools.sh (see README, "Point a workflow at it"), not a
+      # per-machine one, so it does not belong in .env.
+      RUNNER_LABELS: self-hosted,linux,x64,docker,${RUNNER_HOST_LABEL:-unlabelled-host}${RUNNER_EXTRA_LABELS:+,}${RUNNER_EXTRA_LABELS:-}
       # Deliberately not setting RUNNER_NAME: it must be unique per
       # container or `--scale` fails, since GitHub rejects a duplicate
       # runner name. entrypoint.sh builds one from this label plus the
@@ -95,8 +105,13 @@ services:
     #
     # A job gets no more of the host than it needs. Raise these if a build
     # starts being OOM-killed, rather than removing them outright.
-    mem_limit: 1g
-    pids_limit: 512
+    #
+    # Overridable per pool via POOL_MEM_LIMIT / POOL_PIDS_LIMIT (pools.conf/
+    # pools.sh) for a pool whose jobs need more than a typical CI job -- a
+    # clone + venv + pytest build, say. Unset defaults to today's values
+    # exactly.
+    mem_limit: ${POOL_MEM_LIMIT:-1g}
+    pids_limit: ${POOL_PIDS_LIMIT:-512}
 
 secrets:
   github_pat:

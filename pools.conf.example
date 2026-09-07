@@ -1,14 +1,36 @@
-# The pools this host runs. One line per pool: name, owner/repo, count.
-# Read by startRunners.sh and stopRunners.sh -- "all of them" means every
-# line in here, so a host serving fewer repos just has fewer lines.
+# The pools this host runs. One line per pool: name, owner/repo, count, and
+# three optional trailing columns -- label, mem, pids. Read by
+# startRunners.sh and stopRunners.sh -- "all of them" means every line in
+# here, so a host serving fewer repos just has fewer lines.
 #
 #   cp pools.conf.example pools.conf   # gitignored, edit freely
 #
 # <name> becomes the compose project gh-runner-<name>; it does not have to
 # match the repo. <count> is how many containers ./pools.sh scales to.
+#
+# The optional columns are positional -- use "-" for one you want to leave
+# at its default so a later column still lands in the right place:
+#
+#   <label>  extra runner label(s), comma-separated, appended after the
+#            usual self-hosted,linux,x64,docker,<host> set. A workflow can
+#            then target `runs-on: [self-hosted, <label>]` and reach only
+#            this pool. Default: none appended (today's behaviour).
+#   <mem>    per-container mem_limit, e.g. 2g. Default: 1g.
+#   <pids>   per-container pids_limit, e.g. 1024. Default: 512.
+#
+# The issue-worm pool below is a worked example of why this exists: the
+# issue-worm-pro pipeline clones a repo, builds a venv and runs pytest --
+# too much for the 1g default -- and it opens PRs whose CI then needs
+# runners of its own. Sharing the plain "issue-worm-pro" CI pool above would
+# let enough concurrent worm jobs occupy every runner while the CI they are
+# blocked on queues behind them -- a self-deadlock. A separate pool with its
+# own label keeps worm jobs (`runs-on: [self-hosted, issue-worm]`) off the
+# runners that CI and review workflows need. See README.md, "Point a
+# workflow at it".
 
 jobtrack             leonarduk/jobtrack                                    3
 issue-worm-pro       leonarduk/issue-worm-pro                              4
+issue-worm           leonarduk/issue-worm-pro                              2   issue-worm   2g   1024
 java21               leonarduk/java21-udemy-practice-tests                 2
 spring-boot-ai       leonarduk/spring-boot-ai-udemy-practice-tests         2
 spring-professional  leonarduk/spring-professional-udemy-practice-tests    2

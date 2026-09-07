@@ -11,13 +11,28 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 usage() {
   cat <<'EOF'
 Usage:
-  ./pools.sh up    <name> <owner/repo> [count]   bring a pool up (default count 2)
+  ./pools.sh up    <name> <owner/repo> [count] [label] [mem] [pids]
+                                                  bring a pool up (default count 2)
   ./pools.sh down  <name>                        tear a pool down (deregisters cleanly)
-  ./pools.sh reset <name> <owner/repo> [count]    down, then up fresh
+  ./pools.sh reset <name> <owner/repo> [count] [label] [mem] [pids]
+                                                  down, then up fresh
   ./pools.sh list                                 every pool this host knows about
 
 <name> is the short label used in the project name, e.g. "jobtrack" for
 gh-runner-jobtrack. It does not have to match the repo name.
+
+[label], [mem] and [pids] are optional, trailing, and positional -- pass "-"
+for one you want to leave at its default so a later one still lands in the
+right slot, e.g. `./pools.sh up issue-worm leonarduk/issue-worm-pro 2
+issue-worm 2g`. Omitted or "-" means "use today's default" in each case:
+
+  [label]  extra runner label(s), comma-separated, appended after the usual
+           self-hosted,linux,x64,docker,<host> set -- e.g. "issue-worm" lets
+           a workflow target `runs-on: [self-hosted, issue-worm]` and reach
+           only this pool, separate from the shared CI pool. Default: none
+           appended.
+  [mem]    per-container mem_limit, e.g. "2g". Default: 1g.
+  [pids]   per-container pids_limit, e.g. "1024". Default: 512.
 
 reset exists for the state a pool ends up in after manual `docker rm`/`stop`
 surgery: mismatched images, containers still under compose's radar but not
@@ -35,7 +50,14 @@ project() { printf 'gh-runner-%s' "$1"; }
 
 cmd_up() {
   local name="$1" repo="$2" count="${3:-2}"
+  local label="${4:-}" mem="${5:-}" pids="${6:-}"
+  # "-" is the placeholder for "use the default", so a later positional arg
+  # can be set without also having to set the ones before it.
+  [[ "$label" == "-" ]] && label=""
+  [[ "$mem" == "-" ]] && mem=""
+  [[ "$pids" == "-" ]] && pids=""
   GITHUB_REPOSITORY="$repo" COMPOSE_PROJECT_NAME="$(project "$name")" \
+    RUNNER_EXTRA_LABELS="$label" POOL_MEM_LIMIT="$mem" POOL_PIDS_LIMIT="$pids" \
     docker compose up -d --build --scale "runner=${count}"
 }
 
@@ -46,8 +68,9 @@ cmd_down() {
 
 cmd_reset() {
   local name="$1" repo="$2" count="${3:-2}"
+  local label="${4:-}" mem="${5:-}" pids="${6:-}"
   COMPOSE_PROJECT_NAME="$(project "$name")" docker compose down --remove-orphans 2>/dev/null || true
-  cmd_up "$name" "$repo" "$count"
+  cmd_up "$name" "$repo" "$count" "$label" "$mem" "$pids"
 }
 
 cmd_list() {
