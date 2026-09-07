@@ -1,0 +1,48 @@
+name: PowerShell Parse
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  powershell-parse:
+    name: PowerShell Parse
+    # windows-latest is the only runner image carrying both shells:
+    # `powershell` (Windows PowerShell 5.1) and `pwsh` (7+). Checking under 7
+    # alone would prove nothing -- 5.1 is the shell this exists for, since
+    # Start-RunnerPool.ps1 falls back to it on hosts without pwsh, and 7-only
+    # syntax parses happily under 7 right up to the moment it strands a fleet.
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      # Two named steps rather than a matrix over `shell:`, so the check name
+      # in the PR says which of the two shells rejected the file. That is the
+      # single fact you want first, and a matrix leg called "parse (1)" does
+      # not give it to you.
+      #
+      # `exit $LASTEXITCODE` is not redundant. Calling a .ps1 does not by
+      # itself set the step's exit code: the runner appends its own
+      # $LASTEXITCODE check, but without one of the two the script's `exit 1`
+      # is swallowed and the step goes green over failing files -- a lint job
+      # that cannot fail is worse than no lint job, because it is believed.
+      - name: Parse under Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          ./.github/scripts/Test-PowerShellParses.ps1
+          exit $LASTEXITCODE
+
+      # Runs even when 5.1 has already failed: knowing whether a file is
+      # broken under both shells or only under 5.1 is the difference between
+      # a typo and a 7-ism, and waiting a second CI round-trip to learn which
+      # is a waste of a run.
+      - name: Parse under PowerShell 7+
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          ./.github/scripts/Test-PowerShellParses.ps1
+          exit $LASTEXITCODE
