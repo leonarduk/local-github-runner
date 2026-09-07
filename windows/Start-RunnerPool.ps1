@@ -56,8 +56,13 @@ for ($i = 1; $i -le $Count; $i++) {
     $labels = "self-hosted,windows,$Arch,$HostLabel"
     $log = Join-Path $logDir "slot-$i.log"
 
+    # Prefer PowerShell 7, but fall back to Windows PowerShell 5.1 rather than
+    # failing outright: `pwsh` is not present on a stock Windows install, and a
+    # missing-executable error here surfaces only as a slot that never starts,
+    # with nothing in its log to say why.
+    $shell = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell' }
     $psi = @{
-        FilePath     = 'pwsh'
+        FilePath     = $shell
         ArgumentList = @(
             '-NoProfile', '-File', (Join-Path $PSScriptRoot 'runner-loop.ps1'),
             '-RunnerDir', $slot,

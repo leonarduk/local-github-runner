@@ -34,8 +34,16 @@ Actions minutes," matching this repo's actual reason for existing.
 
 ## Prerequisites
 
-- **PowerShell 7+ (`pwsh`)** on the host. `Start-RunnerPool.ps1` launches
-  `runner-loop.ps1` via `pwsh`, not `powershell.exe`.
+- **PowerShell 7+ (`pwsh`)** on the host, preferred but not required.
+  `Start-RunnerPool.ps1` launches `runner-loop.ps1` via `pwsh` when it is on
+  `PATH` and falls back to Windows PowerShell 5.1 (`powershell.exe`) when it is
+  not, so a stock Windows install works without installing anything first.
+- **An execution policy that will run unsigned local scripts.** Nothing in this
+  repo is code-signed, so a host left on `AllSigned` refuses every `.ps1` here
+  -- including `windows-startRunners.ps1` and `windows-pools.ps1` -- with
+  *"File ... is not digitally signed. You cannot run this script on the current
+  system."* That is the policy talking, not a corrupt or untrusted file. See
+  [Execution policy](#execution-policy) below.
 - **[GitHub CLI](https://cli.github.com)**, authenticated (`gh auth login`) --
   used by `windows-pools.ps1 list` to cross-check what GitHub actually sees,
   same as the Linux side's `pools.sh list`.
@@ -45,6 +53,62 @@ Actions minutes," matching this repo's actual reason for existing.
   Explorer window into a slot's `_work` directory can make `Reset-Workspace`
   in `runner-loop.ps1` fail to delete it. If a slot's log shows repeated
   registration without ever picking up a job, check for that first.
+
+## Execution policy
+
+Windows blocks unsigned scripts before any of this repo's code gets a say, and
+the message names the file rather than the policy, so it reads like the script
+is broken:
+
+```
+.\startRunners.ps1 : File ...\startRunners.ps1 cannot be loaded. The file
+...\startRunners.ps1 is not digitally signed. You cannot run this script on
+the current system.
+    + FullyQualifiedErrorId : UnauthorizedAccess
+```
+
+Check what is actually set -- the answer is a table, not one value. It is
+printed in precedence order, so the first non-`Undefined` scope reading *down*
+from the top is the one in force:
+
+```powershell
+Get-ExecutionPolicy -List
+```
+
+`AllSigned` in `LocalMachine` (with `CurrentUser` left `Undefined`, so it
+inherits) is the usual culprit. `AllSigned` demands a signature on *every*
+script including ones you wrote yourself on this machine, so it blocks the
+whole fleet -- `windows-stopRunners.ps1` and `windows-pools.ps1` fail exactly
+the same way, which is worth knowing before you conclude one script is at
+fault.
+
+Fix it for your account only -- no admin rights, and `LocalMachine` keeps
+`AllSigned` for everything else, since `CurrentUser` takes precedence:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
+
+`RemoteSigned` rather than `Bypass` on purpose: a file cloned by git carries no
+`Zone.Identifier` alternate data stream, so it counts as local and runs, while
+anything genuinely downloaded from the internet still has to be signed. If a
+`.ps1` here *does* refuse to run under `RemoteSigned`, it arrived via a browser
+or a zip rather than a clone -- confirm with
+`Get-Item .\startRunners.ps1 -Stream Zone.Identifier` and clear it with
+`Unblock-File`, rather than reaching for `Bypass`.
+
+To run one script without changing any setting -- useful on a machine whose
+policy is not yours to change:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\startRunners.ps1
+```
+
+Note that a `Process`-scope policy is per-shell: it explains why a script runs
+under one terminal (or under a CI agent, or a tool that spawns
+`powershell -ExecutionPolicy Bypass`) and refuses in the window you are typing
+in. Compare `Get-ExecutionPolicy -List` in both before assuming the difference
+is the script.
 
 ## Quick start
 
