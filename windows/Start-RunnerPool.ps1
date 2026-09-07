@@ -27,6 +27,15 @@ if (-not (Test-Path $PatFile)) {
 $poolDir = Join-Path $root "windows\runners\$Name"
 $logDir  = Join-Path $poolDir 'logs'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+
+# Point setup-python/setup-node/etc at a persistent, pre-populated tool
+# cache (see Install-PythonToolCache.ps1) instead of the default location
+# under this slot's own _work, which gets wiped every job. Both var names
+# are set because different actions/toolkit versions read one or the
+# other. Start-Process below inherits this from the current environment.
+$toolCacheDir = Join-Path $root 'windows\toolcache'
+$env:RUNNER_TOOL_CACHE = $toolCacheDir
+$env:AGENT_TOOLSDIRECTORY = $toolCacheDir
 # Remembered so windows-pools.ps1 list can report which repo a pool serves
 # without needing it passed in again, the same way pools.sh list reads
 # GITHUB_REPOSITORY back out of a container's own environment.
@@ -56,8 +65,20 @@ for ($i = 1; $i -le $Count; $i++) {
     $labels = "self-hosted,windows,$Arch,$HostLabel"
     $log = Join-Path $logDir "slot-$i.log"
 
+    # Prefer PowerShell 7, but fall back to Windows PowerShell 5.1 rather than
+    # failing outright: `pwsh` is not present on a stock Windows install, and a
+    # missing-executable error here surfaces only as a slot that never starts,
+    # with nothing in its log to say why.
+    #
+    # The fallback is only safe while runner-loop.ps1 stays 5.1-compatible, so
+    # keep it that way: no ternary, no `??`/`?.`, no `&&`/`||` between commands,
+    # no `ConvertFrom-Json -AsHashtable`, no `ForEach-Object -Parallel`. All of
+    # those parse fine under 7 and are syntax errors under 5.1, which would
+    # strand every slot on exactly the hosts this fallback exists to serve.
+    # `[Parser]::ParseFile()` under 5.1 is the cheap way to check after editing.
+    $shell = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell' }
     $psi = @{
-        FilePath     = 'pwsh'
+        FilePath     = $shell
         ArgumentList = @(
             '-NoProfile', '-File', (Join-Path $PSScriptRoot 'runner-loop.ps1'),
             '-RunnerDir', $slot,

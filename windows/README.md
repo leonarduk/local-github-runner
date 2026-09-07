@@ -34,8 +34,16 @@ Actions minutes," matching this repo's actual reason for existing.
 
 ## Prerequisites
 
-- **PowerShell 7+ (`pwsh`)** on the host. `Start-RunnerPool.ps1` launches
-  `runner-loop.ps1` via `pwsh`, not `powershell.exe`.
+- **PowerShell 7+ (`pwsh`)** on the host, preferred but not required.
+  `Start-RunnerPool.ps1` launches `runner-loop.ps1` via `pwsh` when it is on
+  `PATH` and falls back to Windows PowerShell 5.1 (`powershell.exe`) when it is
+  not, so a stock Windows install works without installing anything first.
+- **An execution policy that will run unsigned local scripts.** Nothing in this
+  repo is code-signed, so a host left on `AllSigned` refuses every `.ps1` here
+  -- including `windows-startRunners.ps1` and `windows-pools.ps1` -- with
+  *"File ... is not digitally signed. You cannot run this script on the current
+  system."* That is the policy talking, not a corrupt or untrusted file. See
+  [Execution policy](#execution-policy) below.
 - **[GitHub CLI](https://cli.github.com)**, authenticated (`gh auth login`) --
   used by `windows-pools.ps1 list` to cross-check what GitHub actually sees,
   same as the Linux side's `pools.sh list`.
@@ -45,6 +53,62 @@ Actions minutes," matching this repo's actual reason for existing.
   Explorer window into a slot's `_work` directory can make `Reset-Workspace`
   in `runner-loop.ps1` fail to delete it. If a slot's log shows repeated
   registration without ever picking up a job, check for that first.
+
+## Execution policy
+
+Windows blocks unsigned scripts before any of this repo's code gets a say, and
+the message names the file rather than the policy, so it reads like the script
+is broken:
+
+```
+.\startRunners.ps1 : File ...\startRunners.ps1 cannot be loaded. The file
+...\startRunners.ps1 is not digitally signed. You cannot run this script on
+the current system.
+    + FullyQualifiedErrorId : UnauthorizedAccess
+```
+
+Check what is actually set -- the answer is a table, not one value. It is
+printed in precedence order, so the first non-`Undefined` scope reading *down*
+from the top is the one in force:
+
+```powershell
+Get-ExecutionPolicy -List
+```
+
+`AllSigned` in `LocalMachine` (with `CurrentUser` left `Undefined`, so it
+inherits) is the usual culprit. `AllSigned` demands a signature on *every*
+script including ones you wrote yourself on this machine, so it blocks the
+whole fleet -- `windows-stopRunners.ps1` and `windows-pools.ps1` fail exactly
+the same way, which is worth knowing before you conclude one script is at
+fault.
+
+Fix it for your account only -- no admin rights, and `LocalMachine` keeps
+`AllSigned` for everything else, since `CurrentUser` takes precedence:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
+
+`RemoteSigned` rather than `Bypass` on purpose: a file cloned by git carries no
+`Zone.Identifier` alternate data stream, so it counts as local and runs, while
+anything genuinely downloaded from the internet still has to be signed. If a
+`.ps1` here *does* refuse to run under `RemoteSigned`, it arrived via a browser
+or a zip rather than a clone -- confirm with
+`Get-Item .\startRunners.ps1 -Stream Zone.Identifier` and clear it with
+`Unblock-File`, rather than reaching for `Bypass`.
+
+To run one script without changing any setting -- useful on a machine whose
+policy is not yours to change:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\startRunners.ps1
+```
+
+Note that a `Process`-scope policy is per-shell: it explains why a script runs
+under one terminal (or under a CI agent, or a tool that spawns
+`powershell -ExecutionPolicy Bypass`) and refuses in the window you are typing
+in. Compare `Get-ExecutionPolicy -List` in both before assuming the difference
+is the script.
 
 ## Quick start
 
@@ -83,6 +147,7 @@ Tear a pool down:
 | File | Role |
 |---|---|
 | `Install-Runner.ps1` | Downloads, SHA256-verifies, and unpacks the runner zip into a slot directory. Run automatically by `Start-RunnerPool.ps1`; call it directly only to pre-stage a slot or bump the version. |
+| `Install-PythonToolCache.ps1` | Downloads, SHA256-verifies, and per-user-installs one Python version into `windows\toolcache\`, the shared, persistent tool cache `Start-RunnerPool.ps1` points `RUNNER_TOOL_CACHE`/`AGENT_TOOLSDIRECTORY` at. Not run automatically -- see "Language runtimes" below. |
 | `runner-loop.ps1` | The actual ephemeral loop: mint a registration token, `config.cmd`, `run.cmd`, deregister, repeat. One process per slot. The Windows analogue of `entrypoint.sh`. |
 | `Start-RunnerPool.ps1` | Brings up `-Count` slots for one repo as hidden background processes, logging to `windows\runners\<name>\logs\`. The Windows analogue of `pools.sh up`. |
 | `Stop-RunnerPool.ps1` | Signals slots to stop via a stop-file, waits, optionally force-kills. The Windows analogue of `pools.sh down`. |
@@ -94,6 +159,33 @@ One level up from this directory:
 | `windows-pools.ps1` | `up` / `down` / `reset` / `list`, mirroring `pools.sh` exactly. |
 | `windows-pools.conf` / `.example` | Which repos this host serves natively on Windows, mirroring `pools.conf`. |
 | `windows-startRunners.ps1` / `windows-stopRunners.ps1` | Bring the whole fleet in `windows-pools.conf` up or down at once. |
+
+## Language runtimes (`actions/setup-python` and friends)
+
+On a **cache miss**, `actions/setup-python` (and `setup-node`, `setup-java`)
+tries to download and self-install a runtime, and that self-install assumes
+an elevated process: it writes `HKLM\...\Uninstall` entries and runs the
+official installer expecting admin rights. `runner-loop.ps1` intentionally
+runs unelevated (see "What this does not give you" above), so that install
+fails -- job logs show `Requested registry access is not allowed` followed by
+the installer exe not being found.
+
+The fix is to make sure it's never a cache miss. `Start-RunnerPool.ps1`
+points `RUNNER_TOOL_CACHE`/`AGENT_TOOLSDIRECTORY` at `windows\toolcache\`, a
+persistent directory outside any slot's ephemeral `_work` (which gets wiped
+every job). Pre-populate it once per runtime/version a workflow needs:
+
+```powershell
+.\windows\Install-PythonToolCache.ps1                              # Python 3.11.9, x64
+.\windows\Install-PythonToolCache.ps1 -Version 3.12.7 -Arch x64
+```
+
+A workflow asking for `python-version: "3.11"` matches any cached `3.11.z`
+via `actions/setup-python`'s semver range check, so one patch release per
+minor version is enough -- it does not need to track the newest patch.
+`windows\toolcache\` is gitignored and disposable like `windows\runners\`,
+just longer-lived: rerunning the install script is a no-op once a version is
+cached (`-Force` to reinstall).
 
 ## Runtime state
 

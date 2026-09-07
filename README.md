@@ -4,6 +4,12 @@
 
 Ephemeral, containerised, self-hosted GitHub Actions runners for private repositories. One checkout runs a pool per repository, on as many machines as you like.
 
+**Need `runs-on: windows-latest`?** The containers here are Linux only and will
+never match a `windows-*` job. This repo also ships a second, native (non-containerised)
+Windows fleet for that -- **[windows/README.md](windows/README.md)** -- driven by
+`windows-pools.conf` and `windows-startRunners.ps1`, and runnable side by side with the
+Linux pools on the same host. The rest of this file is the Linux/container fleet.
+
 ## WHY
 
 As I have a lot of private repos, and although you have some free action runner minutes for private repos, unlimited for free repos,  I burn through them quickly.  You can "self-host" runners and GitHub will trigger them.
@@ -13,6 +19,9 @@ As I have a lot of private repos, and although you have some free action runner 
 See below
 
 **[Quick start](#quick-start)** -- if you just want it running, start there.
+
+**[Windows (native) runners](windows/README.md)** -- the separate fleet for
+`runs-on: [self-hosted, windows, x64]` jobs, in its own README.
 
 <details>
 <summary>Everything else in this file</summary>
@@ -216,9 +225,24 @@ Checklist first, story below for whichever line actually bites:
   see below, this one is sneaky)
 - [ ] **GitHub CLI** installed and authenticated
 - [ ] On Windows, scripts are invoked via Git Bash, not raw `bash` (which may silently be WSL)
+- [ ] On Windows, an **execution policy** that runs unsigned local scripts, if you use the
+  `.ps1` entry points (`startRunners.ps1`, `stopRunners.ps1`) -- see below
 
 The pool is only as reliable as the machine under it, and two of these are the
 kind of thing you debug for an afternoon before suspecting them.
+
+**Windows execution policy.** Nothing in this repo is code-signed, so a host on
+`AllSigned` refuses every `.ps1` here before any of this code runs, naming the
+file rather than the policy: *"File ...\startRunners.ps1 cannot be loaded. The
+file ... is not digitally signed."* It reads like a broken script and is not.
+`Get-ExecutionPolicy -List` shows which scope is in force -- typically
+`AllSigned` on `LocalMachine` with `CurrentUser` left `Undefined` -- and
+`Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned` fixes it
+for your account without admin rights or weakening the machine-wide setting. It
+affects only the PowerShell entry points: the Git Bash path (`startRunners.sh`,
+`pools.sh`) is untouched by this, which is worth remembering when one fleet
+starts and the other refuses. Full detail, including why `RemoteSigned` rather
+than `Bypass`, is in [windows/README.md](windows/README.md#execution-policy).
 
 **Docker.** Docker Desktop on Windows or macOS, Docker Engine on Linux. On
 Windows use the WSL2 backend; the Hyper-V backend works but is slower at the
