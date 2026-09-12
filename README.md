@@ -201,10 +201,10 @@ the orchestration was not buying anything.
 `pools.sh` wraps the operations below for a host running several pools:
 
 ```bash
-./pools.sh up    <name> <owner/repo> [count]   # bring a pool up
-./pools.sh down  <name>                        # tear one down
-./pools.sh reset <name> <owner/repo> [count]    # down, then up fresh
-./pools.sh list                                 # every pool on this host, and what GitHub actually sees
+./pools.sh up    <name> <owner/repo> [count] [label] [mem] [pids]  # bring a pool up
+./pools.sh down  <name>                                            # tear one down
+./pools.sh reset <name> <owner/repo> [count] [label] [mem] [pids]  # down, then up fresh
+./pools.sh list                                                     # every pool on this host, and what GitHub actually sees
 ```
 
 `<name>` is just the label in the project name (`gh-runner-<name>`); it need
@@ -212,6 +212,12 @@ not match the repo. `list` is the one worth knowing about even if you never
 use the others: it cross-checks each pool's containers against GitHub's own
 `actions/runners` API, which is the only way to catch a pool that looks fine
 in `docker ps` but registered nothing.
+
+`[label]`, `[mem]` and `[pids]` are optional, trailing, and positional --
+pass `-` for one you want to leave at its default so a later one still lands
+in the right slot. They let a pool carry an extra runner label and its own
+`mem_limit`/`pids_limit`, separate from every other pool on the host; see
+[Dedicated pools for a specific kind of job](#dedicated-pools-for-a-specific-kind-of-job).
 
 You need the PAT described next.
 
@@ -254,11 +260,13 @@ after a reboot, but only once the engine is running. Without it the jobs simply
 queue with no runner, which looks like CI is broken rather than a stopped
 Docker engine.
 
-Give it enough memory. Each runner declares `mem_limit: 1g`, so *N* runners
-across all your pools can ask for *N* GiB, against whatever ceiling Docker
-Desktop is set to in *Settings* → *Resources*. Over-committing does not error —
-it shows up as jobs mysteriously crawling when several repos build at once.
-Count the containers, not the pools.
+Give it enough memory. Each runner declares `mem_limit: 1g` by default, so *N*
+runners across all your pools can ask for *N* GiB, against whatever ceiling
+Docker Desktop is set to in *Settings* → *Resources*. Over-committing does not
+error — it shows up as jobs mysteriously crawling when several repos build at
+once. Count the containers, not the pools — and a pool with a raised
+`mem_limit` (see [Dedicated pools for a specific kind of job](#dedicated-pools-for-a-specific-kind-of-job))
+counts for more than one container's worth per replica.
 
 **Sleep. This one silently cancels jobs.** A host that suspends mid-job stops
 the runner's heartbeat, and GitHub cancels the job server-side. The signature is
@@ -475,6 +483,69 @@ Verified end to end against `leonarduk/spring-professional-udemy-practice-tests`
 GitHub's own reference for this syntax and the default label set is
 [Choosing the runner for a job](https://docs.github.com/actions/using-jobs/choosing-the-runner-for-a-job).
 
+## Dedicated pools for a specific kind of job
+
+Every pool so far shares one shape: a repo's normal CI, where a runner picks
+up a job, runs it in minutes, and frees up again. Some jobs do not behave
+like that -- a long-running pipeline that itself opens pull requests is the
+one that surfaced this. `issue-worm-pro`'s pipeline clones a repo, builds a
+venv and runs `pytest` inside a container job, which already needs more than
+the 1g/512-pid defaults below are sized for. Worse, the PR it opens needs
+runners of its own, for `python-ci.yml` and the review workflows, and a
+`Changes Requested` requeue loop waits on those. Point enough concurrent worm
+jobs at the same pool that serves that repo's CI, and they can occupy every
+runner while the CI they are blocked on queues behind them -- a
+self-inflicted deadlock, not an external one.
+
+The fix is a **separate pool with its own label**, never the CI pool: worm
+jobs run where `python-ci.yml` and the review workflows cannot be queued
+behind them, because they are physically on different runners.
+
+`RUNNER_EXTRA_LABELS` (compose.yaml) is what makes a pool reachable that way.
+It appends one or more comma-separated labels after the usual
+`self-hosted,linux,x64,docker,<host>` set, so a workflow can target
+`runs-on: [self-hosted, issue-worm]` and land only on pools carrying that
+label -- CI's `runs-on: [self-hosted, linux, x64]` never matches it, and
+nothing else needs to change. Unset, it reproduces today's label set exactly
+-- no trailing comma, nothing appended.
+
+`POOL_MEM_LIMIT` / `POOL_PIDS_LIMIT` (compose.yaml) override that pool's
+`mem_limit` / `pids_limit` away from the 1g/512 defaults, which a clone +
+venv + `pytest` build is liable to exceed. Unset, both stay at today's
+values.
+
+All three are per-pool, so they are set the same way as `[count]`: as
+trailing, optional, positional arguments to `./pools.sh up`/`reset`, or as
+the fourth through sixth columns of a `pools.conf` line (`-` skips one to
+reach a later column). They are deliberately not `.env` settings -- `.env`
+holds facts about the machine, and these differ per pool on the same
+machine.
+
+```bash
+# one-off, via pools.sh
+./pools.sh up issue-worm leonarduk/issue-worm-pro 2 issue-worm 2g 1024
+
+# or in pools.conf, alongside the plain CI pool for the same repo
+# name                  owner/repo                     count  label        mem   pids
+issue-worm-pro          leonarduk/issue-worm-pro        4
+issue-worm              leonarduk/issue-worm-pro        2     issue-worm   2g    1024
+```
+
+Then point the worm workflow(s) at the label, leaving every other job in
+that repo (and every other repo's CI) targeting the plain pool:
+
+```yaml
+-    runs-on: ubuntu-latest
++    runs-on: [self-hosted, issue-worm]
+```
+
+This mitigates the starvation risk; it does not eliminate queuing outright.
+Two pools drawing from the same finite host memory still compete for it, and
+undersizing either pool's `[count]` just moves the queue rather than removing
+it -- size each pool to the concurrency it actually needs, the same way as
+any other pool (see [Host prerequisites](#host-prerequisites), "Give it
+enough memory").
+
 ## What the image provides
 
 | | |
@@ -521,7 +592,7 @@ That relies on `entrypoint.sh` signalling `Runner.Listener` directly rather than
 - **No Docker-in-Docker.** Adding it means mounting the host's Docker socket, which hands any job root on the host — do not do that on the strength of this README alone.
 - **`actions/cache` has no backing store**, so cache steps are no-ops that cost a little time. Worth knowing if a workflow starts depending on a warm cache.
 - **`pip install` only works after `actions/setup-python`.** The base is Ubuntu 24.04, whose system interpreter refuses installs under PEP 668 (`externally-managed-environment`). `setup-python` puts its own interpreter on PATH first — but a workflow that drops that step keeps working on a GitHub-hosted runner and fails here.
-- **`mem_limit: 1g` / `pids_limit: 512`** are conservative. If a build is OOM-killed, raise them rather than removing them.
+- **`mem_limit: 1g` / `pids_limit: 512`** are conservative defaults. If a build is OOM-killed, raise them per pool with `POOL_MEM_LIMIT` / `POOL_PIDS_LIMIT` rather than removing the limits outright -- see [Dedicated pools for a specific kind of job](#dedicated-pools-for-a-specific-kind-of-job).
 - **This container image is Linux only.** A workflow pinned to `windows-*` will never match it -- see [windows/README.md](windows/README.md) for the separate, non-containerised path that does. `macos-*` is not covered by anything in this repo.
 - **Pool names use the repo name, not `owner/repo`.** Two repos of the same name under different owners would collide.
 
