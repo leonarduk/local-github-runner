@@ -64,6 +64,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # provides `gpg`, which codecov-action shells out to (to verify its uploader
 # signature) and which ubuntu-latest also carries by default.
 #
+# lsb-release closes a third: it provides `lsb_release`, which
+# actions/setup-python's Linux path shells out to for distro detection.
+# ubuntu-latest carries it by default; this image is minimal and did not,
+# which failed "Set up Python" outright with "Unable to locate executable
+# file: lsb_release" (confirmed live via leonarduk/issue-worm-pro#751's
+# dogfood run of leonarduk/issue-worm's composite action).
+#
 # Versions intentionally unpinned: these come from Ubuntu's rolling package
 # mirror, and a version pinned today is routinely gone from the mirror by the
 # time this image is rebuilt, breaking the build instead of reproducing it.
@@ -75,6 +82,7 @@ RUN apt-get update \
         git \
         gnupg \
         jq \
+        lsb-release \
         procps \
         shellcheck \
         sudo \
