@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Exercises pools.sh's start/stop/restart/restart-runner/list --json against
-# stub docker and gh on PATH: no Docker daemon, no GitHub, nothing real is
-# touched.
+# Exercises pools.sh's start/stop/restart/restart-runner/scale/sync/list --json
+# against stub docker and gh on PATH: no Docker daemon, no GitHub, nothing
+# real is touched.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -39,16 +39,18 @@ case "$1" in
     esac ;;
   inspect)
     case "$2" in
-      gh-runner-worm-runner-1|abc123def456) id=abc123def456 proj=gh-runner-worm repo=o/r ;;
-      gh-runner-worm-runner-2|222222222222) id=222222222222 proj=gh-runner-worm repo=o/r ;;
-      gh-runner-stray-runner-1|fff000fff000) id=fff000fff000 proj=gh-runner-stray repo="${FAKE_STRAY_REPO:-o/stray}" ;;
-      unrelated-db) id=333333333333 proj=something-else repo="" ;;
+      gh-runner-worm-runner-1|abc123def456) id=abc123def456 proj=gh-runner-worm repo=o/r extra=",worm-label" ;;
+      gh-runner-worm-runner-2|222222222222) id=222222222222 proj=gh-runner-worm repo=o/r extra=",worm-label" ;;
+      gh-runner-stray-runner-1|fff000fff000) id=fff000fff000 proj=gh-runner-stray repo="${FAKE_STRAY_REPO:-o/stray}" extra=",stray-label" ;;
+      unrelated-db) id=333333333333 proj=something-else repo="" extra="" ;;
       *) echo "Error: No such object: $2" >&2; exit 1 ;;
     esac
     case "$args" in
       *compose.project*) echo "$proj" ;;
       *Hostname*) echo "$id" ;;
-      *) printf 'GITHUB_REPOSITORY=%s\n' "$repo" ;;
+      # 2g, and compose.yaml's default pids_limit.
+      *HostConfig*) echo "2147483648 512" ;;
+      *) printf 'GITHUB_REPOSITORY=%s\nRUNNER_LABELS=self-hosted,linux,x64,docker,box%s\n' "$repo" "$extra" ;;
     esac ;;
   restart) echo "docker-restart ${*:2}" ;;
   compose)
@@ -123,6 +125,23 @@ check "restart-runner refuses when nothing in the pool matches" 3 "can't confirm
 check "restart-runner refuses a container that isn't a runner" 1 "isn't a runner container" -- bash "$p" restart-runner unrelated-db
 check "restart-runner refuses a container that doesn't exist" 1 "no container named 'nosuch'" -- bash "$p" restart-runner nosuch
 
+check "scale up on an idle pool" 0 \
+  "repo=o/idle project=gh-runner-idle label= mem= pids= :: up -d --build --scale runner=3" -- bash "$p" scale idle 3
+check "scale up on a pool with a busy runner succeeds" 0 \
+  "repo=o/r project=gh-runner-worm label=worm-label mem=2g pids=1024 :: up -d --build --scale runner=3" \
+  -- env FAKE_BUSY=true bash "$p" scale worm 3
+check "scale down on an idle pool" 0 \
+  "repo=o/r project=gh-runner-worm label=worm-label mem=2g pids=1024 :: up -d --build --scale runner=1" \
+  -- bash "$p" scale worm 1
+check "scale down with a busy runner refuses" 3 "1 busy runner" -- env FAKE_BUSY=true bash "$p" scale worm 1
+check "scale down --force skips the busy check" 0 \
+  "repo=o/r project=gh-runner-worm label=worm-label mem=2g pids=1024 :: up -d --build --scale runner=1" \
+  -- env FAKE_BUSY=true bash "$p" scale worm 1 --force
+check "scale refuses an undeclared pool" 1 "no pool named 'stray'" -- bash "$p" scale stray 2
+check "scale rejects a non-numeric count" 1 "usage: ./pools.sh scale" -- bash "$p" scale worm abc
+check "scale rejects an unknown option" 1 "unknown option '--bogus'" -- bash "$p" scale worm 2 --bogus
+check "scale rejects extra arguments" 1 "usage: ./pools.sh scale" -- bash "$p" scale worm 2 --force extra
+
 check "list --json counts only this pool's runners and lists its containers" 0 \
   '"name":"worm","project":"gh-runner-worm","repo":"o/r","managed":true,"desired":2,"label":"worm-label","containers":{"total":2,"running":1},"runners":{"online":1,"busy":1},"members":[{"container":"gh-runner-worm-runner-1","id":"abc123def456","state":"running","status":"Up 2 hours","runner":{"name":"somehost-abc123def456-42","status":"online","busy":true}},{"container":"gh-runner-worm-runner-2","id":"222222222222","state":"exited","status":"Exited (1) 3 minutes ago","runner":null}]}' \
   -- env FAKE_BUSY=true bash "$p" list --json
@@ -147,6 +166,31 @@ for scenario in plain awkward; do
     fails=$((fails + 1))
   fi
 done
+
+# sync rewrites its pools.conf, so it gets a copy of its own. worm's count
+# is two digits here, to check the columns after it stay put.
+unset FAKE_STRAY_REPO
+s="$tmp/sync"
+mkdir -p "$s"
+cp "$here/../pools.sh" "$s/"
+printf '# keep me\nworm   o/r    10   worm-label   2g   1024\nidle   o/idle 1\n' > "$s/pools.conf"
+cp "$s/pools.conf" "$s/original"
+{
+  printf '# keep me\nworm   o/r    2    worm-label   2g   1024\nidle   o/idle 1\n'
+  printf '%-20s %-53s %s   stray-label   2g\n' stray o/stray 1
+} > "$s/expected"
+
+check "sync --dry-run reports a changed count" 0 "worm: 10 -> 2" -- bash "$s/pools.sh" sync --dry-run
+check "sync --dry-run reports an undeclared pool" 0 "stray: added (o/stray, 1)" -- bash "$s/pools.sh" sync --dry-run
+check "sync --dry-run leaves pools.conf alone" 0 "" -- cmp "$s/pools.conf" "$s/original"
+check "sync notes a declared pool with no containers" 0 "idle: no containers here" -- bash "$s/pools.sh" sync
+check "sync rewrites counts and adds undeclared pools with their label and limits" 0 "" -- diff "$s/expected" "$s/pools.conf"
+check "sync keeps the previous pools.conf" 0 "" -- cmp "$s/pools.conf.bak" "$s/original"
+check "sync again changes nothing" 0 "already matches" -- bash "$s/pools.sh" sync
+check "an adopted pool is declared afterwards" 0 \
+  '"name":"stray","project":"gh-runner-stray","repo":"o/stray","managed":true,"desired":1,"label":"stray-label"' \
+  -- env FAKE_CID=fff000fff000 bash "$s/pools.sh" list --json stray
+check "sync rejects an unknown option" 1 "usage: ./pools.sh sync" -- bash "$s/pools.sh" sync --bogus
 
 if (( fails )); then
   echo "$fails check(s) failed"
