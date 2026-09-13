@@ -142,6 +142,70 @@ Tear a pool down:
 .\windows-stopRunners.ps1 -Force   # kills them instead
 ```
 
+## Driving pools from something else
+
+`windows-pools.ps1` also has `start` / `stop` / `restart` / `restart-runner`
+and `list -Json`, mirroring the Linux side's `pools.sh start` / `stop` /
+`restart` / `restart-runner` / `list --json` command for command:
+
+```powershell
+.\windows-pools.ps1 start <name>                        # bring one up exactly as windows-pools.conf declares it
+.\windows-pools.ps1 stop  <name> [-Force]                # tear one down, unless a runner is busy
+.\windows-pools.ps1 restart <name> [-Force]              # stop, then start, unless a runner is busy
+.\windows-pools.ps1 restart-runner <container> [-Force]  # restart one runner, unless it is busy
+.\windows-pools.ps1 list -Json [<name>...]                # every pool on this host, and what GitHub actually sees
+```
+
+- **`start <name>`** takes nothing but the name. The repo and slot count come
+  from that pool's `windows-pools.conf` line, so a caller can't bring up a
+  pool that file doesn't describe.
+- **`stop <name>`** asks GitHub first and exits `3` instead of stopping if
+  any of the pool's slots is busy -- stopping mid-job cancels the job. It
+  also exits `3` when GitHub can't be asked, when no runner on GitHub matches
+  any of the pool's slots (since "unknown" is not "idle"), or when the pool
+  has slots but no repo can be determined for it (no `.repo` file and no
+  `windows-pools.conf` line -- there would be nothing to check idle-ness
+  against). `-Force` skips the check. Once confirmed idle (or `-Force`), the
+  local stop is always forced: an ephemeral runner between jobs just sits
+  listening for the next one, so unlike a mid-job process it never exits on
+  its own -- see "What this does not give you" above.
+- **`restart <name>`** is `stop` then `start`, with the same busy check, so
+  it only works on a pool `windows-pools.conf` declares.
+- **`restart-runner <container>`** restarts one slot, named as `list -Json`
+  reports it in each member's `container` field (`H-<COMPUTERNAME>-jobtrack-slot1`):
+  it stops that slot's process and starts it fresh. It refuses if that
+  runner is busy, or if GitHub can't be asked. A slot with no runner
+  registered -- one stuck failing to register, say -- is restarted, unless
+  no slot in its pool matches a runner either, which would mean the matching
+  is broken. Searches every pool under `windows\runners\`, declared or not,
+  the same way `pools.sh restart-runner` works on any docker container on
+  the host.
+- **`list -Json`** prints one JSON array, matching `pools.sh list --json`'s
+  shape field for field (`name`, `repo`, `managed`, `desired`, `label`,
+  `containers`, `runners`, `members`), with two differences: `label` is
+  always `null` (`windows-pools.conf` has no extra-label column), and every
+  entry carries `"os":"windows"`. A "container" here is a slot -- a `.pid`
+  file under `windows\runners\<name>\slot-N` -- matched to a GitHub runner by
+  the deterministic name `Start-RunnerPool.ps1` builds for it
+  (`"$HostLabel-$env:COMPUTERNAME-$Name-slot$i"`). `list -Json jobtrack`
+  limits it to the named pools, the same reason as the Linux side: every
+  pool costs a GitHub API call. GitHub capitalizes the `windows` label on the
+  way back (`"Windows"`, not `"windows"` as registered), so every match
+  against it is case-insensitive.
+
+`stop`, `restart`, `restart-runner` and `list -Json` read
+`repos/<owner>/<repo>/actions/runners` through the host's own `gh` login,
+same as the Linux side -- see the main README's note on the access that
+needs. Without it, the first three refuse and `list -Json` reports
+`"runners": null`.
+
+`tests\windows_pools_test.ps1` exercises all of the above against a fake
+`gh` and real, harmless, locally-spawned processes standing in for slots --
+no Docker daemon to fake here, and nothing real is touched either. Run it
+with `pwsh -File tests\windows_pools_test.ps1`, or `powershell.exe -File
+tests\windows_pools_test.ps1` where `pwsh` isn't on `PATH` -- both are
+exercised in CI.
+
 ## The pieces
 
 | File | Role |
@@ -152,12 +216,14 @@ Tear a pool down:
 | `runner-loop.ps1` | The actual ephemeral loop: mint a registration token, `config.cmd`, `run.cmd`, deregister, repeat. One process per slot. The Windows analogue of `entrypoint.sh`. |
 | `Start-RunnerPool.ps1` | Brings up `-Count` slots for one repo as hidden background processes, logging to `windows\runners\<name>\logs\`. The Windows analogue of `pools.sh up`. |
 | `Stop-RunnerPool.ps1` | Signals slots to stop via a stop-file, waits, optionally force-kills. The Windows analogue of `pools.sh down`. |
+| `PoolSlot.ps1` | Shared library, dot-sourced by every script above plus `windows-pools.ps1`: per-slot start/stop primitives, `windows-pools.conf` parsing, and GitHub-runner matching. The Windows analogue of `pools.sh`'s internal plumbing functions (`conf_line()`, `repo_runners()`, `require_idle()`, ...). PowerShell 5.1 compatible on purpose -- see its own header. |
+| `Restart-RunnerSlot.ps1` | Restarts one slot, identified by the GitHub runner name it registers under. The Windows analogue of `pools.sh restart-runner`, for a single slot. |
 
 One level up from this directory:
 
 | File | Role |
 |---|---|
-| `windows-pools.ps1` | `up` / `down` / `reset` / `list`, mirroring `pools.sh` exactly. |
+| `windows-pools.ps1` | `up` / `down` / `reset` / `list` / `start` / `stop` / `restart` / `restart-runner`, mirroring `pools.sh` exactly. |
 | `windows-pools.conf` / `.example` | Which repos this host serves natively on Windows, mirroring `pools.conf`. |
 | `windows-startRunners.ps1` / `windows-stopRunners.ps1` | Bring the whole fleet in `windows-pools.conf` up or down at once. |
 
