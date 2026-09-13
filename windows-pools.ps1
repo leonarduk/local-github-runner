@@ -161,7 +161,8 @@ switch ($Command) {
         $poolDir = Join-Path $runnersRoot $name
         $repo = Get-PoolRepo -PoolDir $poolDir
         $runnerNames = Get-PoolRunnerNames -PoolDir $poolDir -Name $name
-        Assert-RunnersIdle -Label "pool '$name'" -Repo $repo -RunnerNames $runnerNames -Force:$Force
+        $hasSlots = (Get-PoolSlotDirs -PoolDir $poolDir).Count -gt 0
+        Assert-RunnersIdle -Label "pool '$name'" -Repo $repo -RunnerNames $runnerNames -HasSlots:$hasSlots -Force:$Force
         # Already confirmed idle (or -Force): force the local stop too,
         # since an ephemeral runner that isn't mid-job just sits listening
         # for the next job -- it won't exit on its own inside
@@ -181,7 +182,8 @@ switch ($Command) {
         $repo = Get-PoolRepo -PoolDir $poolDir
         if (-not $repo) { $repo = $line.Repo }
         $runnerNames = Get-PoolRunnerNames -PoolDir $poolDir -Name $name
-        Assert-RunnersIdle -Label "pool '$name'" -Repo $repo -RunnerNames $runnerNames -Force:$Force
+        $hasSlots = (Get-PoolSlotDirs -PoolDir $poolDir).Count -gt 0
+        Assert-RunnersIdle -Label "pool '$name'" -Repo $repo -RunnerNames $runnerNames -HasSlots:$hasSlots -Force:$Force
         & (Join-Path $windowsDir 'Stop-RunnerPool.ps1') -Name $name -Force -TimeoutSeconds 10
         if ($LASTEXITCODE) { exit $LASTEXITCODE }
         & (Join-Path $windowsDir 'Start-RunnerPool.ps1') -Name $name -Repo $line.Repo -Count $line.Count `

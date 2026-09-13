@@ -248,7 +248,8 @@ Export-ModuleMember -Function gh
     Set-Content -Path $assertScript -Value @"
 Import-Module gh -Force
 . '$($winDir -replace "'", "''")\PoolSlot.ps1'
-Assert-RunnersIdle -Label 'pool ''worm''' -Repo `$env:TEST_REPO -RunnerNames @('H-C-worm-slot1','H-C-worm-slot2') -Force:([bool]`$env:TEST_FORCE)
+`$names = if (`$env:TEST_NO_RUNNER_NAMES -eq '1') { @() } else { @('H-C-worm-slot1','H-C-worm-slot2') }
+Assert-RunnersIdle -Label 'pool ''worm''' -Repo `$env:TEST_REPO -RunnerNames `$names -HasSlots:(-not [bool]`$env:TEST_NO_SLOTS) -Force:([bool]`$env:TEST_FORCE)
 Write-Output 'idle-ok'
 "@
     $shellExe = 'powershell'
@@ -274,6 +275,23 @@ Write-Output 'idle-ok'
     Check 'Assert-RunnersIdle -Force skips the check' 0 'idle-ok' { & $shellExe -NoProfile -File $assertScript }
     $env:TEST_FORCE = ''
     $env:FAKE_RUNNERS = $null
+
+    # -HasSlots is what actually gates the skip, not an empty RunnerNames
+    # list on its own: a pool with genuinely no slot directories is safe
+    # to skip (nothing there), but a pool whose slot directories all
+    # failed to parse into a runner name is NOT the same thing -- one of
+    # those directories could still hold a live, possibly mid-job process
+    # (see PoolSlot.ps1's comment on Assert-RunnersIdle). Both scenarios
+    # leave RunnerNames empty; only -HasSlots tells them apart.
+    $env:TEST_NO_SLOTS = '1'
+    $env:FAKE_GH_FAIL = '1'
+    Check 'Assert-RunnersIdle skips the check when the pool truly has no slots' 0 'idle-ok' { & $shellExe -NoProfile -File $assertScript }
+    $env:TEST_NO_SLOTS = ''
+    $env:FAKE_GH_FAIL = $null
+
+    $env:TEST_NO_RUNNER_NAMES = '1'
+    Check 'Assert-RunnersIdle refuses when a pool has slots but none parsed to a runner name' 3 "can't confirm it is idle" { & $shellExe -NoProfile -File $assertScript }
+    $env:TEST_NO_RUNNER_NAMES = ''
 
     # ==================================================================
     # Stop-Slot
@@ -421,6 +439,15 @@ exit `$LASTEXITCODE
     # way "which repo does this serve" can actually be unknown.
     New-Pool -Name 'stray2' -SlotCount 1 -RunningCount 1 | Out-Null
     Check-Wp 'stop rejects a pool with no repo recorded and no declared repo' 3 "can't tell which repo" @('stop', 'stray2', '-HostLabel', 'H')
+
+    # A pool whose only slot directory doesn't parse into a runner name at
+    # all (see windows-pools.ps1's own Get-PoolRunnerNames and PoolSlot.ps1's
+    # Assert-RunnersIdle -HasSlots comment): this used to leave RunnerNames
+    # empty and skip the busy check entirely -- silently force-stopping
+    # whatever process actually lived under that directory, busy or not.
+    New-Pool -Name 'onlybogus' -Repo 'o/onlybogus' -SlotCount 0 | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $runnersRoot 'onlybogus\slot-bogus') | Out-Null
+    Check-Wp 'stop refuses a pool whose only slot directory has no parseable index' 3 "can't confirm it is idle" @('stop', 'onlybogus', '-HostLabel', 'H')
 
     $env:FAKE_RUNNERS = '[{"name":"H-C-worm-slot1","status":"online","busy":false},{"name":"H-C-worm-slot2","status":"online","busy":false}]'
     Check-Wp 'stop an idle pool succeeds' 0 '' @('stop', 'worm', '-HostLabel', 'H')

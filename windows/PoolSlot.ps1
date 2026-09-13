@@ -154,7 +154,16 @@ function Get-GhRunnersForRepo {
         if (@($obj.runners).Count -lt 100) { break }
         $page++
     }
-    return $all.ToArray()
+    # The leading comma is load-bearing: a bare `return $all.ToArray()`
+    # collapses to $null at the call site when the repo genuinely has zero
+    # runners (a real PowerShell gotcha -- an empty array returned from a
+    # function unrolls to nothing on the pipeline, which an assignment like
+    # `$runners = Get-GhRunnersForRepo ...` then sees as $null). That would
+    # make Get-RunnerMatchStats treat "GitHub said zero runners" the same
+    # as "GitHub could not be asked", misreporting Known as $false. The
+    # comma operator wraps the array so it survives the return as one
+    # object instead of being enumerated away.
+    return ,$all.ToArray()
 }
 
 # The entry in <Runners> (as returned by Get-GhRunnersForRepo) whose .name
@@ -212,15 +221,24 @@ function Get-RunnerMatchStats {
 # can still pick up a job right after this. Mirrors pools.sh's
 # require_idle(), generalised over both the whole-pool and single-slot
 # cases (stop/restart vs restart-runner) via the same RunnerNames list.
+#
+# -HasSlots must reflect whether the pool has ANY slot directory on disk,
+# not just ones whose name parsed into a runner name -- RunnerNames only
+# ever holds the ones that did (see Get-PoolRunnerNames). Skipping the
+# check on an empty RunnerNames list, full stop, would treat "every slot
+# directory's name is malformed" the same as "there is genuinely nothing
+# here", and the former can still have a live, possibly mid-job process
+# behind that malformed name; only the latter is actually safe to skip.
 function Assert-RunnersIdle {
     param(
         [Parameter(Mandatory)][string]$Label,
         [string]$Repo,
         [string[]]$RunnerNames,
+        [switch]$HasSlots,
         [switch]$Force
     )
     if ($Force) { return }
-    if (-not $RunnerNames -or $RunnerNames.Count -eq 0) { return }
+    if (-not $HasSlots) { return }
     if (-not $Repo) {
         Invoke-PoolRefuse "can't tell which repo $Label serves, so can't check it is idle"
     }
