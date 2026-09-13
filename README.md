@@ -204,7 +204,9 @@ the orchestration was not buying anything.
 ./pools.sh up    <name> <owner/repo> [count] [label] [mem] [pids]  # bring a pool up
 ./pools.sh down  <name>                                            # tear one down
 ./pools.sh reset <name> <owner/repo> [count] [label] [mem] [pids]  # down, then up fresh
-./pools.sh list                                                     # every pool on this host, and what GitHub actually sees
+./pools.sh start <name>                                             # bring one up exactly as pools.conf declares it
+./pools.sh stop  <name> [--force]                                   # tear one down, unless a runner is busy
+./pools.sh list  [--json [<name>...]]                               # every pool on this host, and what GitHub actually sees
 ```
 
 `<name>` is just the label in the project name (`gh-runner-<name>`); it need
@@ -212,6 +214,47 @@ not match the repo. `list` is the one worth knowing about even if you never
 use the others: it cross-checks each pool's containers against GitHub's own
 `actions/runners` API, which is the only way to catch a pool that looks fine
 in `docker ps` but registered nothing.
+
+`start`, `stop` and `list --json` are for driving pools from something else
+-- a dashboard, a cron job:
+
+- **`start <name>`** takes nothing but the name. The repo, size, label and
+  limits come from that pool's `pools.conf` line, so a caller can't bring up
+  a pool that file doesn't describe.
+- **`stop <name>`** asks GitHub first and exits `3` instead of stopping if
+  any of the pool's runners is busy -- a `down` mid-job cancels the job. It
+  also exits `3` when GitHub can't be asked, or when no runner on GitHub
+  matches any of the pool's containers, since "unknown" is not "idle".
+  `--force` skips the check. It stops any pool running here, declared in
+  `pools.conf` or not.
+- **`list --json`** prints one JSON array with every pool in `pools.conf`
+  plus every `gh-runner-*` project running here that `pools.conf` doesn't
+  declare (`"managed": false`) -- pools started by hand, which
+  `stopRunners.sh` never touches. Its `runners` counts only the GitHub
+  runners registered by that pool's own containers (matched on the container
+  ID in each runner's name), so two pools serving one repo -- a CI pool and a
+  dedicated `issue-worm` pool, say -- are told apart. `runners` is `null`
+  when GitHub couldn't be asked. `list --json issue-worm` limits it to the
+  named pools: every pool costs a GitHub API call, so a whole-host listing
+  with a dozen pools takes tens of seconds, which matters for anything that
+  polls.
+
+```json
+[{"name":"issue-worm","project":"gh-runner-issue-worm","repo":"leonarduk/issue-worm-pro",
+  "managed":true,"desired":2,"label":"issue-worm",
+  "containers":{"total":2,"running":2},"runners":{"online":2,"busy":0}}]
+```
+
+Runners registered by other hosts serving the same repo are not counted: a
+host can only see and control its own containers.
+
+`stop` and `list --json` read `repos/<owner>/<repo>/actions/runners` through
+the host's own `gh` login, which needs admin access to the repo -- a classic
+token with `repo`, or a fine-grained one with **Administration: read**.
+Without it, `stop` refuses and `list --json` reports `"runners": null`.
+
+`tests/pools_test.sh` exercises `start`/`stop`/`list --json` against stub
+`docker` and `gh` commands, so it needs neither a Docker daemon nor GitHub.
 
 `[label]`, `[mem]` and `[pids]` are optional, trailing, and positional --
 pass `-` for one you want to leave at its default so a later one still lands
