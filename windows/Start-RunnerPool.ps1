@@ -24,6 +24,8 @@ if (-not (Test-Path $PatFile)) {
     throw "no PAT file at $PatFile -- see README.md, 'Save the PAT'. The Linux and Windows pools share the same pat.secret."
 }
 
+. (Join-Path $PSScriptRoot 'PoolSlot.ps1')
+
 $poolDir = Join-Path $root "windows\runners\$Name"
 $logDir  = Join-Path $poolDir 'logs'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
@@ -41,59 +43,24 @@ $env:AGENT_TOOLSDIRECTORY = $toolCacheDir
 # GITHUB_REPOSITORY back out of a container's own environment.
 Set-Content -Path (Join-Path $poolDir '.repo') -Value $Repo
 
+# RUNNER_HOST_LABEL, mirrored from the Linux side: names the physical
+# machine so GitHub's runner list says which box a job ran on, since this
+# hostname is real (not random hex like a container's) but two machines can
+# still share a Windows computer name on different LANs.
+#
+# Prefer PowerShell 7, but fall back to Windows PowerShell 5.1 rather than
+# failing outright: `pwsh` is not present on a stock Windows install, and a
+# missing-executable error here surfaces only as a slot that never starts,
+# with nothing in its log to say why.
+#
+# The fallback is only safe while runner-loop.ps1 (and PoolSlot.ps1's
+# Start-Slot, which does the actual work below) stay 5.1-compatible, so
+# keep it that way: no ternary, no `??`/`?.`, no `&&`/`||` between commands,
+# no `ConvertFrom-Json -AsHashtable`, no `ForEach-Object -Parallel`. All of
+# those parse fine under 7 and are syntax errors under 5.1, which would
+# strand every slot on exactly the hosts this fallback exists to serve.
+# `[Parser]::ParseFile()` under 5.1 is the cheap way to check after editing.
 for ($i = 1; $i -le $Count; $i++) {
-    $slot = Join-Path $poolDir "slot-$i"
-    $pidFile  = Join-Path $slot '.pid'
-    $stopFile = Join-Path $slot '.stop'
-
-    if (Test-Path $pidFile) {
-        $existingPid = Get-Content $pidFile -ErrorAction SilentlyContinue
-        if ($existingPid -and (Get-Process -Id $existingPid -ErrorAction SilentlyContinue)) {
-            Write-Host "Start-RunnerPool: $Name slot-$i already running (pid $existingPid), skipping"
-            continue
-        }
-    }
-    Remove-Item -Force -ErrorAction SilentlyContinue $stopFile
-
-    & (Join-Path $PSScriptRoot 'Install-Runner.ps1') -Path $slot -Version $RunnerVersion -Arch $Arch
-
-    # RUNNER_HOST_LABEL, mirrored from the Linux side: names the physical
-    # machine so GitHub's runner list says which box a job ran on, since
-    # this hostname is real (not random hex like a container's) but two
-    # machines can still share a Windows computer name on different LANs.
-    $runnerName = "$HostLabel-$env:COMPUTERNAME-$Name-slot$i"
-    $labels = "self-hosted,windows,$Arch,$HostLabel"
-    $log = Join-Path $logDir "slot-$i.log"
-
-    # Prefer PowerShell 7, but fall back to Windows PowerShell 5.1 rather than
-    # failing outright: `pwsh` is not present on a stock Windows install, and a
-    # missing-executable error here surfaces only as a slot that never starts,
-    # with nothing in its log to say why.
-    #
-    # The fallback is only safe while runner-loop.ps1 stays 5.1-compatible, so
-    # keep it that way: no ternary, no `??`/`?.`, no `&&`/`||` between commands,
-    # no `ConvertFrom-Json -AsHashtable`, no `ForEach-Object -Parallel`. All of
-    # those parse fine under 7 and are syntax errors under 5.1, which would
-    # strand every slot on exactly the hosts this fallback exists to serve.
-    # `[Parser]::ParseFile()` under 5.1 is the cheap way to check after editing.
-    $shell = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell' }
-    $psi = @{
-        FilePath     = $shell
-        ArgumentList = @(
-            '-NoProfile', '-File', (Join-Path $PSScriptRoot 'runner-loop.ps1'),
-            '-RunnerDir', $slot,
-            '-Repo', $Repo,
-            '-PatFile', $PatFile,
-            '-RunnerName', $runnerName,
-            '-Labels', $labels,
-            '-StopFile', $stopFile
-        )
-        WindowStyle           = 'Hidden'
-        RedirectStandardOutput = $log
-        RedirectStandardError  = "$log.err"
-        PassThru               = $true
-    }
-    $proc = Start-Process @psi
-    Set-Content -Path $pidFile -Value $proc.Id
-    Write-Host "Start-RunnerPool: $Name slot-$i started (pid $($proc.Id)), logging to $log"
+    Start-Slot -PoolDir $poolDir -Name $Name -Index $i -Repo $Repo -PatFile $PatFile `
+        -HostLabel $HostLabel -WindowsDir $PSScriptRoot -RunnerVersion $RunnerVersion -Arch $Arch
 }
