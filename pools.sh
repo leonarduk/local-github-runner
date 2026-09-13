@@ -56,7 +56,8 @@ start and stop are the pair for anything driving this script on someone's
 behalf -- a dashboard, a cron job. start takes nothing but a name, so the
 repo, size, label and limits can only come from pools.conf. stop asks GitHub
 first and exits 3 rather than cancel a job one of the pool's runners is
-running -- or when GitHub can't be asked, since "unknown" is not "idle".
+running -- or when GitHub can't be asked, or none of GitHub's runners can
+be matched to the pool's containers, since "unknown" is not "idle".
 --force skips that check. stop works on any pool running here, declared or
 not; start only on one pools.conf declares.
 
@@ -110,30 +111,34 @@ pool_repo() {
     | sed -n 's/^GITHUB_REPOSITORY=//p' || true
 }
 
-# "<online> <busy>" for the GitHub runners registered by the given containers.
-# Fails when GitHub can't be asked.
+# "<matched> <online> <busy>" for the GitHub runners registered by the given
+# containers. Fails when GitHub can't be asked.
 pool_runner_counts() {
   local repo="$1"; shift
-  local runners name status busy cid online=0 nbusy=0
-  runners="$(gh api "repos/${repo}/actions/runners" --paginate \
+  local runners name status busy cid matched=0 online=0 nbusy=0
+  runners="$(gh api "repos/${repo}/actions/runners?per_page=100" --paginate \
     --jq '.runners[] | "\(.name) \(.status) \(.busy)"' 2>/dev/null)" || return 1
   while read -r name status busy; do
     [[ -z "$name" ]] && continue
     for cid in "$@"; do
       if [[ "$name" == *"-${cid}-"* ]]; then
+        matched=$((matched + 1))
         [[ "$status" == online ]] && online=$((online + 1))
         [[ "$busy" == true ]] && nbusy=$((nbusy + 1))
         break
       fi
     done
   done <<< "$runners"
-  printf '%s %s\n' "$online" "$nbusy"
+  printf '%s %s %s\n' "$matched" "$online" "$nbusy"
 }
 
 json_str() {
   local s="${1//\\/\\\\}"
   s="${s//\"/\\\"}"
-  printf '"%s"' "$s"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  printf '"%s"' "${s//[[:cntrl:]]/}"
 }
 
 json_str_or_null() {
@@ -174,9 +179,10 @@ cmd_start() {
 }
 
 cmd_stop() {
-  local name="${1:?usage: ./pools.sh stop <name> [--force]}" force="${2:-}"
+  (( $# >= 1 && $# <= 2 )) || die "usage: ./pools.sh stop <name> [--force]"
+  local name="$1" force="${2:-}"
   [[ -z "$force" || "$force" == "--force" ]] || die "unknown option '$force' -- usage: ./pools.sh stop <name> [--force]"
-  local proj cids repo counts busy
+  local proj cids repo counts matched busy
   proj="$(project "$name")"
   cids="$(pool_cids "$proj")"
   # Advisory, not a lock: a runner can still pick up a job between this
@@ -192,7 +198,15 @@ cmd_stop() {
       echo "pools.sh: could not ask GitHub whether $proj is busy -- --force to stop anyway" >&2
       exit "$EXIT_REFUSED"
     fi
-    busy="${counts#* }"
+    read -r matched _ busy <<< "$counts"
+    # A container between jobs is briefly unregistered, but a running job
+    # always has a registration -- so if not one of the pool's containers
+    # matches a runner, the likelier story is that the name-matching broke,
+    # and a broken match would hide a busy runner.
+    if (( matched == 0 )); then
+      echo "pools.sh: no runner on GitHub matches any of $proj's containers, so can't confirm it is idle -- --force to stop anyway" >&2
+      exit "$EXIT_REFUSED"
+    fi
     if (( busy > 0 )); then
       echo "pools.sh: $proj has $busy busy runner(s); stopping would cancel their jobs -- --force to stop anyway" >&2
       exit "$EXIT_REFUSED"
@@ -226,7 +240,7 @@ cmd_list() {
 }
 
 cmd_list_json() {
-  local all names proj name line managed repo desired label cids total running counts runners first=1
+  local all names proj name line managed repo desired label cids total running counts online busy runners first=1
   if (( $# )); then
     names="$(printf '%s\n' "$@")"
   else
@@ -263,7 +277,8 @@ cmd_list_json() {
     if [[ -n "$cids" ]]; then
       # shellcheck disable=SC2086 # one short hex container ID per word
       if [[ -n "$repo" ]] && counts="$(pool_runner_counts "$repo" $cids)"; then
-        runners="{\"online\":${counts% *},\"busy\":${counts#* }}"
+        read -r _ online busy <<< "$counts"
+        runners="{\"online\":${online},\"busy\":${busy}}"
       else
         runners=null
       fi

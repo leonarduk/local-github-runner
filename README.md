@@ -223,7 +223,8 @@ in `docker ps` but registered nothing.
   a pool that file doesn't describe.
 - **`stop <name>`** asks GitHub first and exits `3` instead of stopping if
   any of the pool's runners is busy -- a `down` mid-job cancels the job. It
-  also exits `3` when GitHub can't be asked, since "unknown" is not "idle".
+  also exits `3` when GitHub can't be asked, or when no runner on GitHub
+  matches any of the pool's containers, since "unknown" is not "idle".
   `--force` skips the check. It stops any pool running here, declared in
   `pools.conf` or not.
 - **`list --json`** prints one JSON array with every pool in `pools.conf`
@@ -246,6 +247,14 @@ in `docker ps` but registered nothing.
 
 Runners registered by other hosts serving the same repo are not counted: a
 host can only see and control its own containers.
+
+`stop` and `list --json` read `repos/<owner>/<repo>/actions/runners` through
+the host's own `gh` login, which needs admin access to the repo -- a classic
+token with `repo`, or a fine-grained one with **Administration: read**.
+Without it, `stop` refuses and `list --json` reports `"runners": null`.
+
+`tests/pools_test.sh` exercises `start`/`stop`/`list --json` against stub
+`docker` and `gh` commands, so it needs neither a Docker daemon nor GitHub.
 
 `[label]`, `[mem]` and `[pids]` are optional, trailing, and positional --
 pass `-` for one you want to leave at its default so a later one still lands
