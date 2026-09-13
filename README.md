@@ -206,6 +206,8 @@ the orchestration was not buying anything.
 ./pools.sh reset <name> <owner/repo> [count] [label] [mem] [pids]  # down, then up fresh
 ./pools.sh start <name>                                             # bring one up exactly as pools.conf declares it
 ./pools.sh stop  <name> [--force]                                   # tear one down, unless a runner is busy
+./pools.sh restart <name> [--force]                                 # stop, then start, unless a runner is busy
+./pools.sh restart-runner <container> [--force]                     # restart one runner container, unless it is busy
 ./pools.sh list  [--json [<name>...]]                               # every pool on this host, and what GitHub actually sees
 ```
 
@@ -215,8 +217,8 @@ use the others: it cross-checks each pool's containers against GitHub's own
 `actions/runners` API, which is the only way to catch a pool that looks fine
 in `docker ps` but registered nothing.
 
-`start`, `stop` and `list --json` are for driving pools from something else
--- a dashboard, a cron job:
+`start`, `stop`, `restart`, `restart-runner` and `list --json` are for
+driving pools from something else -- a dashboard, a cron job:
 
 - **`start <name>`** takes nothing but the name. The repo, size, label and
   limits come from that pool's `pools.conf` line, so a caller can't bring up
@@ -227,6 +229,14 @@ in `docker ps` but registered nothing.
   matches any of the pool's containers, since "unknown" is not "idle".
   `--force` skips the check. It stops any pool running here, declared in
   `pools.conf` or not.
+- **`restart <name>`** is `stop` then `start`, with the same busy check, so
+  it only works on a pool `pools.conf` declares.
+- **`restart-runner <container>`** restarts one runner container, named as
+  `docker ps` shows it (`gh-runner-jobtrack-runner-1`): it deregisters and
+  comes straight back as a fresh runner. It refuses if that runner is busy,
+  or if GitHub can't be asked. A container with no runner registered -- one
+  stuck failing to register, say -- is restarted, unless no container in its
+  pool matches a runner either, which would mean the matching is broken.
 - **`list --json`** prints one JSON array with every pool in `pools.conf`
   plus every `gh-runner-*` project running here that `pools.conf` doesn't
   declare (`"managed": false`) -- pools started by hand, which
@@ -234,26 +244,32 @@ in `docker ps` but registered nothing.
   runners registered by that pool's own containers (matched on the container
   ID in each runner's name), so two pools serving one repo -- a CI pool and a
   dedicated `issue-worm` pool, say -- are told apart. `runners` is `null`
-  when GitHub couldn't be asked. `list --json issue-worm` limits it to the
-  named pools: every pool costs a GitHub API call, so a whole-host listing
-  with a dozen pools takes tens of seconds, which matters for anything that
-  polls.
+  when GitHub couldn't be asked. `members` has one entry per container:
+  its docker state and status, and the GitHub runner it registered (`null`
+  if none, or if GitHub couldn't be asked). `list --json issue-worm` limits
+  it to the named pools: every pool costs a GitHub API call, so a whole-host
+  listing with a dozen pools takes tens of seconds, which matters for
+  anything that polls.
 
 ```json
 [{"name":"issue-worm","project":"gh-runner-issue-worm","repo":"leonarduk/issue-worm-pro",
   "managed":true,"desired":2,"label":"issue-worm",
-  "containers":{"total":2,"running":2},"runners":{"online":2,"busy":0}}]
+  "containers":{"total":2,"running":2},"runners":{"online":2,"busy":0},
+  "members":[{"container":"gh-runner-issue-worm-runner-1","id":"f4c4835f30e8",
+    "state":"running","status":"Up 8 hours",
+    "runner":{"name":"bedroom-f4c4835f30e8-1","status":"online","busy":false}}]}]
 ```
 
 Runners registered by other hosts serving the same repo are not counted: a
 host can only see and control its own containers.
 
-`stop` and `list --json` read `repos/<owner>/<repo>/actions/runners` through
-the host's own `gh` login, which needs admin access to the repo -- a classic
-token with `repo`, or a fine-grained one with **Administration: read**.
-Without it, `stop` refuses and `list --json` reports `"runners": null`.
+`stop`, `restart`, `restart-runner` and `list --json` read
+`repos/<owner>/<repo>/actions/runners` through the host's own `gh` login,
+which needs admin access to the repo -- a classic token with `repo`, or a
+fine-grained one with **Administration: read**. Without it, the first three
+refuse and `list --json` reports `"runners": null`.
 
-`tests/pools_test.sh` exercises `start`/`stop`/`list --json` against stub
+`tests/pools_test.sh` exercises `start`/`stop`/`restart`/`restart-runner`/`list --json` against stub
 `docker` and `gh` commands, so it needs neither a Docker daemon nor GitHub.
 
 `[label]`, `[mem]` and `[pids]` are optional, trailing, and positional --

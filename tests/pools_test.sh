@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Exercises pools.sh's start/stop/list --json against stub docker and gh on
-# PATH: no Docker daemon, no GitHub, nothing real is touched.
+# Exercises pools.sh's start/stop/restart/restart-runner/list --json against
+# stub docker and gh on PATH: no Docker daemon, no GitHub, nothing real is
+# touched.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -10,20 +11,46 @@ mkdir -p "$tmp/bin"
 cp "$here/../pools.sh" "$tmp/"
 printf 'worm   o/r    2   worm-label   2g   1024\nidle   o/idle 1\n' > "$tmp/pools.conf"
 
-# Pools on the stub host: "worm" (declared, one container) and "stray"
-# (running, undeclared). "idle" is declared but has no containers.
+# The stub host: "worm" (declared) with one registered, running container
+# and one exited container that never registered; "stray" (running, not
+# declared) with one container; "idle" declared but with no containers; and
+# "unrelated-db", a container that isn't a runner at all.
 cat > "$tmp/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 args="$*"
 case "$1" in
   ps)
-    if   [[ "$args" == *"project=gh-runner-worm"* ]]; then echo abc123def456
-    elif [[ "$args" == *"project=gh-runner-stray"* ]]; then echo fff000fff000
-    elif [[ "$args" == *"--filter"* ]]; then :
-    else printf 'gh-runner-worm\ngh-runner-stray\nunrelated\n\n'; fi ;;
+    case "$args" in
+      *"project=gh-runner-worm"*)
+        if [[ "$args" == *".Names"* ]]; then
+          printf 'abc123def456\tgh-runner-worm-runner-1\trunning\tUp 2 hours\n'
+          printf '222222222222\tgh-runner-worm-runner-2\texited\tExited (1) 3 minutes ago\n'
+        else
+          printf 'abc123def456\n222222222222\n'
+        fi ;;
+      *"project=gh-runner-stray"*)
+        if [[ "$args" == *".Names"* ]]; then
+          printf 'fff000fff000\tgh-runner-stray-runner-1\trunning\tUp 1 hour\n'
+        else
+          echo fff000fff000
+        fi ;;
+      *"--filter"*) ;;
+      *) printf 'gh-runner-worm\ngh-runner-stray\nunrelated\n\n' ;;
+    esac ;;
   inspect)
-    if [[ "$2" == fff000fff000 ]]; then printf 'GITHUB_REPOSITORY=%s\n' "${FAKE_STRAY_REPO:-o/stray}"
-    else echo GITHUB_REPOSITORY=o/r; fi ;;
+    case "$2" in
+      gh-runner-worm-runner-1|abc123def456) id=abc123def456 proj=gh-runner-worm repo=o/r ;;
+      gh-runner-worm-runner-2|222222222222) id=222222222222 proj=gh-runner-worm repo=o/r ;;
+      gh-runner-stray-runner-1|fff000fff000) id=fff000fff000 proj=gh-runner-stray repo="${FAKE_STRAY_REPO:-o/stray}" ;;
+      unrelated-db) id=333333333333 proj=something-else repo="" ;;
+      *) echo "Error: No such object: $2" >&2; exit 1 ;;
+    esac
+    case "$args" in
+      *compose.project*) echo "$proj" ;;
+      *Hostname*) echo "$id" ;;
+      *) printf 'GITHUB_REPOSITORY=%s\n' "$repo" ;;
+    esac ;;
+  restart) echo "docker-restart ${*:2}" ;;
   compose)
     echo "compose repo=${GITHUB_REPOSITORY:-} project=${COMPOSE_PROJECT_NAME:-} label=${RUNNER_EXTRA_LABELS:-} mem=${POOL_MEM_LIMIT:-} pids=${POOL_PIDS_LIMIT:-} :: ${*:2}" ;;
 esac
@@ -79,18 +106,35 @@ check "start defaults the omitted columns" 0 \
   "repo=o/idle project=gh-runner-idle label= mem= pids= :: up -d --build --scale runner=1" -- bash "$p" start idle
 check "start refuses an undeclared pool" 1 "no pool named 'stray'" -- bash "$p" start stray
 
-check "list --json counts only this pool's runners" 0 \
-  '"name":"worm","project":"gh-runner-worm","repo":"o/r","managed":true,"desired":2,"label":"worm-label","containers":{"total":1,"running":1},"runners":{"online":1,"busy":1}' \
+check "restart an idle pool stops it" 0 "project=gh-runner-worm label= mem= pids= :: down" -- bash "$p" restart worm
+check "restart an idle pool starts it from pools.conf" 0 \
+  "repo=o/r project=gh-runner-worm label=worm-label mem=2g pids=1024 :: up -d --build --scale runner=2" -- bash "$p" restart worm
+check "restart refuses while a runner is busy" 3 "1 busy runner" -- env FAKE_BUSY=true bash "$p" restart worm
+check "restart --force skips the check" 0 ":: up -d --build" -- env FAKE_BUSY=true bash "$p" restart worm --force
+check "restart refuses an undeclared pool" 1 "no pool named 'stray'" -- env FAKE_CID=fff000fff000 bash "$p" restart stray
+
+check "restart-runner an idle runner" 0 "docker-restart -t 60 gh-runner-worm-runner-1" -- bash "$p" restart-runner gh-runner-worm-runner-1
+check "restart-runner refuses a busy runner" 3 "running a job" -- env FAKE_BUSY=true bash "$p" restart-runner gh-runner-worm-runner-1
+check "restart-runner --force skips the check" 0 "docker-restart -t 60 gh-runner-worm-runner-1" -- env FAKE_BUSY=true bash "$p" restart-runner gh-runner-worm-runner-1 --force
+check "restart-runner refuses when GitHub can't be asked" 3 "could not ask GitHub" -- env FAKE_GH_FAIL=1 bash "$p" restart-runner gh-runner-worm-runner-1
+check "restart-runner an unregistered runner whose pool matches" 0 \
+  "docker-restart -t 60 gh-runner-worm-runner-2" -- env FAKE_BUSY=true bash "$p" restart-runner gh-runner-worm-runner-2
+check "restart-runner refuses when nothing in the pool matches" 3 "can't confirm gh-runner-stray-runner-1 is idle" -- bash "$p" restart-runner gh-runner-stray-runner-1
+check "restart-runner refuses a container that isn't a runner" 1 "isn't a runner container" -- bash "$p" restart-runner unrelated-db
+check "restart-runner refuses a container that doesn't exist" 1 "no container named 'nosuch'" -- bash "$p" restart-runner nosuch
+
+check "list --json counts only this pool's runners and lists its containers" 0 \
+  '"name":"worm","project":"gh-runner-worm","repo":"o/r","managed":true,"desired":2,"label":"worm-label","containers":{"total":2,"running":1},"runners":{"online":1,"busy":1},"members":[{"container":"gh-runner-worm-runner-1","id":"abc123def456","state":"running","status":"Up 2 hours","runner":{"name":"somehost-abc123def456-42","status":"online","busy":true}},{"container":"gh-runner-worm-runner-2","id":"222222222222","state":"exited","status":"Exited (1) 3 minutes ago","runner":null}]}' \
   -- env FAKE_BUSY=true bash "$p" list --json
 check "list --json includes undeclared pools" 0 '"name":"stray","project":"gh-runner-stray","repo":"o/stray","managed":false' -- bash "$p" list --json
-check "list --json has runners null when GitHub can't be asked" 0 '"name":"worm"' -- env FAKE_GH_FAIL=1 bash "$p" list --json
+check "list --json gives a pool with no containers no members" 0 '"name":"idle","project":"gh-runner-idle","repo":"o/idle","managed":true,"desired":1,"label":null,"containers":{"total":0,"running":0},"runners":{"online":0,"busy":0},"members":[]}' -- bash "$p" list --json
 check "list --json drops a name nobody knows" 0 "[]" -- bash "$p" list --json nosuch
 check "list rejects an unknown option" 1 "Usage:" -- bash "$p" list --bogus
 
-if FAKE_GH_FAIL=1 bash "$p" list --json worm | grep -qF '"runners":null'; then
-  echo "ok   list --json reports runners null when GitHub can't be asked"
+if FAKE_GH_FAIL=1 bash "$p" list --json worm | grep -qF '"runners":null,"members":[{"container":"gh-runner-worm-runner-1","id":"abc123def456","state":"running","status":"Up 2 hours","runner":null}'; then
+  echo "ok   list --json reports runners null, and no member runners, when GitHub can't be asked"
 else
-  echo "FAIL list --json reports runners null when GitHub can't be asked"
+  echo "FAIL list --json reports runners null, and no member runners, when GitHub can't be asked"
   fails=$((fails + 1))
 fi
 

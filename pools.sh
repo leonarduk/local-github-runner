@@ -10,8 +10,9 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 
 POOLS_CONF="pools.conf"
 
-# stop's exit status when it refuses: a runner is busy, or GitHub couldn't be
-# asked. Distinct from 1 so a caller can offer --force instead of an error.
+# The exit status stop, restart and restart-runner use when they refuse: a
+# runner is busy, or that can't be established. Distinct from 1 so a caller
+# can offer --force instead of an error.
 EXIT_REFUSED=3
 
 usage() {
@@ -24,6 +25,9 @@ Usage:
                                                   down, then up fresh
   ./pools.sh start <name>                        bring a pool up exactly as pools.conf declares it
   ./pools.sh stop  <name> [--force]              tear a pool down unless a runner is busy
+  ./pools.sh restart <name> [--force]            stop, then start, a pool pools.conf declares
+  ./pools.sh restart-runner <container> [--force]
+                                                  restart one runner container unless it is busy
   ./pools.sh list  [--json [<name>...]]          every pool this host knows about
 
 <name> is the short label used in the project name, e.g. "jobtrack" for
@@ -52,29 +56,36 @@ remove, then brings up a fresh pool -- the same clean-slate operation as
 deleting every container by hand, minus the part where GitHub is left with
 runners nothing will ever deregister.
 
-start and stop are the pair for anything driving this script on someone's
-behalf -- a dashboard, a cron job. start takes nothing but a name, so the
-repo, size, label and limits can only come from pools.conf. stop asks GitHub
-first and exits 3 rather than cancel a job one of the pool's runners is
-running -- or when GitHub can't be asked, or none of GitHub's runners can
-be matched to the pool's containers, since "unknown" is not "idle".
---force skips that check. stop works on any pool running here, declared or
-not; start only on one pools.conf declares.
+start, stop, restart and restart-runner are for anything driving this
+script on someone's behalf -- a dashboard, a cron job. start and restart
+take nothing but a name, so the repo, size, label and limits can only come
+from pools.conf. stop, restart and restart-runner ask GitHub first and exit
+3 rather than cancel a job a runner is running -- or when GitHub can't be
+asked, or none of GitHub's runners can be matched to the pool's containers,
+since "unknown" is not "idle". --force skips that check. stop works on any
+pool running here, declared or not; start and restart only on one
+pools.conf declares. restart-runner restarts one container (named as
+`docker ps` shows it, e.g. gh-runner-jobtrack-runner-1): it deregisters and
+comes straight back as a fresh runner.
 
 list --json prints one JSON array: every pool in pools.conf, plus every
 gh-runner-* project running here that pools.conf doesn't declare
 ("managed": false) -- the drift startRunners.sh/stopRunners.sh never touch.
-"runners" counts only the GitHub runners registered by this pool's own
-containers, so two pools serving one repo are told apart; it is null when
-GitHub couldn't be asked. Names after --json limit it to those pools --
-worth doing from anything that polls, since every pool costs a GitHub API
-call; a name that is neither declared nor running is left out.
+"members" has one entry per container, with its docker state and the GitHub
+runner it registered (null if none). "runners" counts only the GitHub
+runners registered by this pool's own containers, so two pools serving one
+repo are told apart; it is null when GitHub couldn't be asked. Names after
+--json limit it to those pools -- worth doing from anything that polls,
+since every pool costs a GitHub API call; a name that is neither declared
+nor running is left out.
 EOF
 }
 
 project() { printf 'gh-runner-%s' "$1"; }
 
 die() { echo "pools.sh: $*" >&2; exit 1; }
+
+refuse() { echo "pools.sh: $* -- --force to do it anyway" >&2; exit "$EXIT_REFUSED"; }
 
 # The pools.conf line for <name>, as "repo count label mem pids" with "-" for
 # any trailing column the line leaves out. Fails if no line declares <name>.
@@ -111,25 +122,67 @@ pool_repo() {
     | sed -n 's/^GITHUB_REPOSITORY=//p' || true
 }
 
+# One "<name> <status> <busy>" line per GitHub runner registered for <repo>.
+# Fails when GitHub can't be asked.
+repo_runners() {
+  gh api "repos/$1/actions/runners?per_page=100" --paginate \
+    --jq '.runners[] | "\(.name) \(.status) \(.busy)"' 2>/dev/null
+}
+
+# From repo_runners' lines on stdin, the one registered by container <cid>.
+# Fails if that container has no runner registered.
+runner_for() {
+  local cid="$1" name status busy
+  while read -r name status busy; do
+    if [[ -n "$name" && "$name" == *"-${cid}-"* ]]; then
+      printf '%s %s %s\n' "$name" "$status" "$busy"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # "<matched> <online> <busy>" for the GitHub runners registered by the given
 # containers. Fails when GitHub can't be asked.
 pool_runner_counts() {
   local repo="$1"; shift
-  local runners name status busy cid matched=0 online=0 nbusy=0
-  runners="$(gh api "repos/${repo}/actions/runners?per_page=100" --paginate \
-    --jq '.runners[] | "\(.name) \(.status) \(.busy)"' 2>/dev/null)" || return 1
-  while read -r name status busy; do
-    [[ -z "$name" ]] && continue
-    for cid in "$@"; do
-      if [[ "$name" == *"-${cid}-"* ]]; then
-        matched=$((matched + 1))
-        [[ "$status" == online ]] && online=$((online + 1))
-        [[ "$busy" == true ]] && nbusy=$((nbusy + 1))
-        break
-      fi
-    done
-  done <<< "$runners"
+  local runners line status busy cid matched=0 online=0 nbusy=0
+  runners="$(repo_runners "$repo")" || return 1
+  for cid in "$@"; do
+    line="$(runner_for "$cid" <<< "$runners")" || continue
+    read -r _ status busy <<< "$line"
+    matched=$((matched + 1))
+    [[ "$status" == online ]] && online=$((online + 1))
+    [[ "$busy" == true ]] && nbusy=$((nbusy + 1))
+  done
   printf '%s %s %s\n' "$matched" "$online" "$nbusy"
+}
+
+# Exits 3 unless GitHub confirms none of pool <name>'s runners is busy.
+# Advisory, not a lock: a runner can still pick up a job right after this.
+require_idle() {
+  local proj cids repo counts matched busy
+  proj="$(project "$1")"
+  cids="$(pool_cids "$proj")"
+  [[ -n "$cids" ]] || return 0
+  repo="$(pool_repo "$(head -1 <<< "$cids")")"
+  [[ -n "$repo" ]] || refuse "can't tell which repo $proj serves, so can't check it is idle"
+  # shellcheck disable=SC2086 # one short hex container ID per word
+  counts="$(pool_runner_counts "$repo" $cids)" || refuse "could not ask GitHub whether $proj is busy"
+  read -r matched _ busy <<< "$counts"
+  # A container between jobs is briefly unregistered, but a running job
+  # always has a registration -- so if not one of the pool's containers
+  # matches a runner, the likelier story is that the name-matching broke,
+  # and a broken match would hide a busy runner.
+  (( matched > 0 )) || refuse "no runner on GitHub matches any of $proj's containers, so can't confirm it is idle"
+  (( busy == 0 )) || refuse "$proj has $busy busy runner(s); this would cancel their jobs"
+}
+
+# Validates "<target> [--force]" for <verb>; <what> names the target in usage.
+check_force_args() {
+  local verb="$1" what="$2"; shift 2
+  (( $# >= 1 && $# <= 2 )) || die "usage: ./pools.sh $verb $what [--force]"
+  [[ -z "${2:-}" || "$2" == "--force" ]] || die "unknown option '$2' -- usage: ./pools.sh $verb $what [--force]"
 }
 
 json_str() {
@@ -179,40 +232,46 @@ cmd_start() {
 }
 
 cmd_stop() {
-  (( $# >= 1 && $# <= 2 )) || die "usage: ./pools.sh stop <name> [--force]"
-  local name="$1" force="${2:-}"
-  [[ -z "$force" || "$force" == "--force" ]] || die "unknown option '$force' -- usage: ./pools.sh stop <name> [--force]"
-  local proj cids repo counts matched busy
-  proj="$(project "$name")"
-  cids="$(pool_cids "$proj")"
-  # Advisory, not a lock: a runner can still pick up a job between this
-  # check and the down below.
-  if [[ -n "$cids" && -z "$force" ]]; then
-    repo="$(pool_repo "$(head -1 <<< "$cids")")"
-    if [[ -z "$repo" ]]; then
-      echo "pools.sh: can't tell which repo $proj serves, so can't check it is idle -- --force to stop anyway" >&2
-      exit "$EXIT_REFUSED"
-    fi
-    # shellcheck disable=SC2086 # one short hex container ID per word
-    if ! counts="$(pool_runner_counts "$repo" $cids)"; then
-      echo "pools.sh: could not ask GitHub whether $proj is busy -- --force to stop anyway" >&2
-      exit "$EXIT_REFUSED"
-    fi
-    read -r matched _ busy <<< "$counts"
-    # A container between jobs is briefly unregistered, but a running job
-    # always has a registration -- so if not one of the pool's containers
-    # matches a runner, the likelier story is that the name-matching broke,
-    # and a broken match would hide a busy runner.
-    if (( matched == 0 )); then
-      echo "pools.sh: no runner on GitHub matches any of $proj's containers, so can't confirm it is idle -- --force to stop anyway" >&2
-      exit "$EXIT_REFUSED"
-    fi
-    if (( busy > 0 )); then
-      echo "pools.sh: $proj has $busy busy runner(s); stopping would cancel their jobs -- --force to stop anyway" >&2
-      exit "$EXIT_REFUSED"
+  check_force_args stop "<name>" "$@"
+  [[ -n "${2:-}" ]] || require_idle "$1"
+  cmd_down "$1"
+}
+
+cmd_restart() {
+  check_force_args restart "<name>" "$@"
+  conf_line "$1" >/dev/null \
+    || die "no pool named '$1' in $POOLS_CONF -- restart only works on pools declared there, since it has to start them again"
+  [[ -n "${2:-}" ]] || require_idle "$1"
+  cmd_down "$1"
+  cmd_start "$1"
+}
+
+cmd_restart_runner() {
+  check_force_args restart-runner "<container>" "$@"
+  local container="$1" proj cid repo runners line busy counts matched
+  proj="$(docker inspect "$container" --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null)" \
+    || die "no container named '$container' on this host"
+  [[ "$proj" == gh-runner-* ]] || die "'$container' isn't a runner container (compose project '${proj}')"
+  if [[ -z "${2:-}" ]]; then
+    cid="$(docker inspect "$container" --format '{{.Config.Hostname}}')"
+    repo="$(pool_repo "$container")"
+    [[ -n "$repo" ]] || refuse "can't tell which repo $container serves, so can't check it is idle"
+    runners="$(repo_runners "$repo")" || refuse "could not ask GitHub whether $container is busy"
+    if line="$(runner_for "$cid" <<< "$runners")"; then
+      read -r _ _ busy <<< "$line"
+      [[ "$busy" != true ]] || refuse "$container is running a job; restarting would cancel it"
+    else
+      # No registration is normal for a container between jobs or stuck
+      # failing to register -- what restarting it is for -- unless none of
+      # its pool matches either, which says the name-matching broke.
+      # shellcheck disable=SC2046 # one short hex container ID per word
+      counts="$(pool_runner_counts "$repo" $(pool_cids "$proj"))" \
+        || refuse "could not ask GitHub whether $container is busy"
+      read -r matched _ _ <<< "$counts"
+      (( matched > 0 )) || refuse "no runner on GitHub matches any of $proj's containers, so can't confirm $container is idle"
     fi
   fi
-  cmd_down "$name"
+  docker restart -t 60 "$container"
 }
 
 cmd_list() {
@@ -240,7 +299,9 @@ cmd_list() {
 }
 
 cmd_list_json() {
-  local all names proj name line managed repo desired label cids total running counts online busy runners first=1
+  local all names proj name line managed repo desired label containers cids known rlines
+  local cid cname cstate cstatus rname rstatus rbusy rb runner members sep
+  local total running online busy runners first=1
   if (( $# )); then
     names="$(printf '%s\n' "$@")"
   else
@@ -266,28 +327,44 @@ cmd_list_json() {
       [[ "$desired" =~ ^[0-9]+$ ]] || desired=null
       if [[ "$label" == "-" ]]; then label=null; else label="$(json_str "$label")"; fi
     fi
-    cids="$(pool_cids "$proj")"
+    containers="$(docker ps -a --filter "label=com.docker.compose.project=${proj}" \
+      --format $'{{.ID}}\t{{.Names}}\t{{.State}}\t{{.Status}}')"
     # Only reachable for a name passed on the command line.
-    [[ "$managed" == false && -z "$cids" ]] && continue
-    total=0
-    [[ -n "$cids" ]] && total="$(wc -l <<< "$cids" | tr -d ' ')"
-    running="$(docker ps --filter "label=com.docker.compose.project=${proj}" --format '{{.ID}}' | wc -l | tr -d ' ')"
+    [[ "$managed" == false && -z "$containers" ]] && continue
+    cids="$(cut -f1 <<< "$containers")"
     [[ -z "$repo" && -n "$cids" ]] && repo="$(pool_repo "$(head -1 <<< "$cids")")"
-    runners='{"online":0,"busy":0}'
-    if [[ -n "$cids" ]]; then
-      # shellcheck disable=SC2086 # one short hex container ID per word
-      if [[ -n "$repo" ]] && counts="$(pool_runner_counts "$repo" $cids)"; then
-        read -r _ online busy <<< "$counts"
-        runners="{\"online\":${online},\"busy\":${busy}}"
-      else
-        runners=null
+    known=false rlines=""
+    if [[ -z "$cids" ]]; then
+      known=true
+    elif [[ -n "$repo" ]] && rlines="$(repo_runners "$repo")"; then
+      known=true
+    fi
+    total=0 running=0 online=0 busy=0 members="" sep=""
+    while IFS=$'\t' read -r cid cname cstate cstatus; do
+      [[ -z "$cid" ]] && continue
+      total=$((total + 1))
+      [[ "$cstate" == running ]] && running=$((running + 1))
+      runner=null
+      if [[ "$known" == true ]] && line="$(runner_for "$cid" <<< "$rlines")"; then
+        read -r rname rstatus rbusy <<< "$line"
+        [[ "$rstatus" == online ]] && online=$((online + 1))
+        rb=false
+        if [[ "$rbusy" == true ]]; then rb=true; busy=$((busy + 1)); fi
+        runner="{\"name\":$(json_str "$rname"),\"status\":$(json_str "$rstatus"),\"busy\":${rb}}"
       fi
+      members+="${sep}{\"container\":$(json_str "$cname"),\"id\":$(json_str "$cid"),\"state\":$(json_str "$cstate"),\"status\":$(json_str "$cstatus"),\"runner\":${runner}}"
+      sep=","
+    done <<< "$containers"
+    if [[ "$known" == true ]]; then
+      runners="{\"online\":${online},\"busy\":${busy}}"
+    else
+      runners=null
     fi
     (( first )) || printf ','
     first=0
-    printf '{"name":%s,"project":%s,"repo":%s,"managed":%s,"desired":%s,"label":%s,"containers":{"total":%s,"running":%s},"runners":%s}' \
+    printf '{"name":%s,"project":%s,"repo":%s,"managed":%s,"desired":%s,"label":%s,"containers":{"total":%s,"running":%s},"runners":%s,"members":[%s]}' \
       "$(json_str "$name")" "$(json_str "$proj")" "$(json_str_or_null "$repo")" \
-      "$managed" "$desired" "$label" "$total" "$running" "$runners"
+      "$managed" "$desired" "$label" "$total" "$running" "$runners" "$members"
   done <<< "$names"
   printf ']\n'
 }
@@ -298,6 +375,8 @@ case "${1:-}" in
   reset) shift; cmd_reset "$@" ;;
   start) shift; cmd_start "$@" ;;
   stop)  shift; cmd_stop "$@" ;;
+  restart) shift; cmd_restart "$@" ;;
+  restart-runner) shift; cmd_restart_runner "$@" ;;
   list)
     case "${2:-}" in
       "")     cmd_list ;;
