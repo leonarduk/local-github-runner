@@ -28,6 +28,7 @@ Usage:
   ./pools.sh restart <name> [--force]            stop, then start, a pool pools.conf declares
   ./pools.sh restart-runner <container> [--force]
                                                   restart one runner container unless it is busy
+  ./pools.sh scale <name> <count> [--force]      resize a pool pools.conf declares
   ./pools.sh list  [--json [<name>...]]          every pool this host knows about
 
 <name> is the short label used in the project name, e.g. "jobtrack" for
@@ -56,7 +57,7 @@ remove, then brings up a fresh pool -- the same clean-slate operation as
 deleting every container by hand, minus the part where GitHub is left with
 runners nothing will ever deregister.
 
-start, stop, restart and restart-runner are for anything driving this
+start, stop, restart, restart-runner and scale are for anything driving this
 script on someone's behalf -- a dashboard, a cron job. start and restart
 take nothing but a name, so the repo, size, label and limits can only come
 from pools.conf. stop, restart and restart-runner ask GitHub first and exit
@@ -67,6 +68,14 @@ pool running here, declared or not; start and restart only on one
 pools.conf declares. restart-runner restarts one container (named as
 `docker ps` shows it, e.g. gh-runner-jobtrack-runner-1): it deregisters and
 comes straight back as a fresh runner.
+
+scale <name> <count> also only works on a pool pools.conf declares, but
+resizes it in place instead of tearing it down first. Growing (or bringing
+up a pool with nothing running) is just cmd_up with the new count, so it
+never refuses -- there is nothing already running that scaling up could
+hurt. Shrinking gets the same busy check as stop/restart, since
+`docker compose up --scale` down can't be told which containers to kill,
+and killing a busy one cancels its job; --force skips that check too.
 
 list --json prints one JSON array: every pool in pools.conf, plus every
 gh-runner-* project running here that pools.conf doesn't declare
@@ -115,6 +124,10 @@ conf_names() {
 # middle of the runner name entrypoint.sh registers (<host>-<hostname>-<pid>).
 pool_cids() {
   docker ps -a --filter "label=com.docker.compose.project=$1" --format '{{.ID}}'
+}
+
+pool_running_count() {
+  docker ps --filter "label=com.docker.compose.project=$1" --format '{{.ID}}' | wc -l | tr -d ' '
 }
 
 pool_repo() {
@@ -274,6 +287,25 @@ cmd_restart_runner() {
   docker restart -t 60 "$container"
 }
 
+cmd_scale() {
+  (( $# >= 2 && $# <= 3 )) || die "usage: ./pools.sh scale <name> <count> [--force]"
+  local name="$1" count="$2"
+  [[ -z "${3:-}" || "$3" == "--force" ]] \
+    || die "unknown option '$3' -- usage: ./pools.sh scale <name> <count> [--force]"
+  [[ "$count" =~ ^[0-9]+$ ]] \
+    || die "usage: ./pools.sh scale <name> <count> [--force] -- <count> must be a non-negative integer"
+  local line repo label mem pids current
+  line="$(conf_line "$name")" \
+    || die "no pool named '$name' in $POOLS_CONF -- scale only works on pools declared there"
+  read -r repo _ label mem pids <<< "$line"
+  current="$(pool_running_count "$(project "$name")")"
+  # Growing (or starting from nothing) never touches a running container, so
+  # it needs no busy check. Shrinking does: `docker compose up --scale` down
+  # picks which containers die, and a busy one dying cancels its job.
+  (( count >= current )) || { [[ -n "${3:-}" ]] || require_idle "$name"; }
+  cmd_up "$name" "$repo" "$count" "$label" "$mem" "$pids"
+}
+
 cmd_list() {
   local projects
   projects="$(docker ps -a --format '{{.Label "com.docker.compose.project"}}' | grep '^gh-runner-' | sort -u || true)"
@@ -377,6 +409,7 @@ case "${1:-}" in
   stop)  shift; cmd_stop "$@" ;;
   restart) shift; cmd_restart "$@" ;;
   restart-runner) shift; cmd_restart_runner "$@" ;;
+  scale) shift; cmd_scale "$@" ;;
   list)
     case "${2:-}" in
       "")     cmd_list ;;

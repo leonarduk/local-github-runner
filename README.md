@@ -208,6 +208,7 @@ the orchestration was not buying anything.
 ./pools.sh stop  <name> [--force]                                   # tear one down, unless a runner is busy
 ./pools.sh restart <name> [--force]                                 # stop, then start, unless a runner is busy
 ./pools.sh restart-runner <container> [--force]                     # restart one runner container, unless it is busy
+./pools.sh scale <name> <count> [--force]                           # resize a pools.conf pool, unless shrinking would kill a busy runner
 ./pools.sh list  [--json [<name>...]]                               # every pool on this host, and what GitHub actually sees
 ```
 
@@ -217,8 +218,8 @@ use the others: it cross-checks each pool's containers against GitHub's own
 `actions/runners` API, which is the only way to catch a pool that looks fine
 in `docker ps` but registered nothing.
 
-`start`, `stop`, `restart`, `restart-runner` and `list --json` are for
-driving pools from something else -- a dashboard, a cron job:
+`start`, `stop`, `restart`, `restart-runner`, `scale` and `list --json` are
+for driving pools from something else -- a dashboard, a cron job:
 
 - **`start <name>`** takes nothing but the name. The repo, size, label and
   limits come from that pool's `pools.conf` line, so a caller can't bring up
@@ -237,6 +238,14 @@ driving pools from something else -- a dashboard, a cron job:
   or if GitHub can't be asked. A container with no runner registered -- one
   stuck failing to register, say -- is restarted, unless no container in its
   pool matches a runner either, which would mean the matching is broken.
+- **`scale <name> <count>`** resizes a pool `pools.conf` declares in place,
+  instead of tearing it down and starting fresh like `restart` does.
+  Growing -- or bringing up a pool with nothing running -- is just `up` with
+  the new count, so it never refuses; there's nothing running yet that
+  scaling up could hurt. Shrinking gets the same busy check as `stop` and
+  `restart`, because `docker compose up --scale` down can't be told which
+  containers to kill, and a busy one dying cancels its job. `--force` skips
+  that check.
 - **`list --json`** prints one JSON array with every pool in `pools.conf`
   plus every `gh-runner-*` project running here that `pools.conf` doesn't
   declare (`"managed": false`) -- pools started by hand, which
@@ -263,13 +272,13 @@ driving pools from something else -- a dashboard, a cron job:
 Runners registered by other hosts serving the same repo are not counted: a
 host can only see and control its own containers.
 
-`stop`, `restart`, `restart-runner` and `list --json` read
-`repos/<owner>/<repo>/actions/runners` through the host's own `gh` login,
-which needs admin access to the repo -- a classic token with `repo`, or a
-fine-grained one with **Administration: read**. Without it, the first three
-refuse and `list --json` reports `"runners": null`.
+`stop`, `restart`, `restart-runner`, a shrinking `scale` and `list --json`
+read `repos/<owner>/<repo>/actions/runners` through the host's own `gh`
+login, which needs admin access to the repo -- a classic token with `repo`,
+or a fine-grained one with **Administration: read**. Without it, the busy
+checks refuse and `list --json` reports `"runners": null`.
 
-`tests/pools_test.sh` exercises `start`/`stop`/`restart`/`restart-runner`/`list --json` against stub
+`tests/pools_test.sh` exercises `start`/`stop`/`restart`/`restart-runner`/`scale`/`list --json` against stub
 `docker` and `gh` commands, so it needs neither a Docker daemon nor GitHub.
 
 `[label]`, `[mem]` and `[pids]` are optional, trailing, and positional --
