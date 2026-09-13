@@ -95,6 +95,13 @@ if (-not $Force) {
         $poolRunnerNames = @()
         foreach ($slotDir in $slotDirs) {
             $idx = Get-SlotIndex -SlotName $slotDir.Name
+            # Get-SlotRunnerName's -Index is Mandatory/[int]: a stray
+            # slot-* directory whose name isn't "slot-<digits>" would
+            # otherwise throw here instead of just being left out of the
+            # pool-wide fallback match. Same guard as
+            # windows-pools.ps1's Get-PoolRunnerNames and PoolSlot.ps1's
+            # Get-PoolStatusObject.
+            if ($null -eq $idx) { continue }
             $poolRunnerNames += (Get-SlotRunnerName -HostLabel $HostLabel -Name $foundPoolName -Index $idx)
         }
         $poolStats = Get-RunnerMatchStats -Repo $repo -RunnerNames $poolRunnerNames

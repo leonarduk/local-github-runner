@@ -436,6 +436,13 @@ exit `$LASTEXITCODE
     # ---- restart-runner ----
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $runnersRoot 'worm')
     New-Pool -Name 'worm' -Repo 'o/r' -SlotCount 2 -RunningCount 2 | Out-Null
+    # A malformed slot directory alongside the real ones, for every test
+    # below: Restart-RunnerSlot.ps1's pool-wide fallback match (used
+    # whenever the target runner itself isn't directly registered) used to
+    # call Get-SlotRunnerName -Index on this without checking whether
+    # Get-SlotIndex parsed one first, which threw and aborted
+    # restart-runner instead of just skipping it.
+    New-Item -ItemType Directory -Force -Path (Join-Path $runnersRoot 'worm\slot-bogus') | Out-Null
 
     Check-Wp 'restart-runner refuses a slot that does not exist' 1 'no runner slot found' @('restart-runner', 'nosuch-runner', '-HostLabel', 'H')
 
@@ -448,10 +455,12 @@ exit `$LASTEXITCODE
     $env:FAKE_GH_FAIL = $null
 
     # slot2's runner isn't registered, but slot1's is -- pool match succeeds
-    # so restart-runner proceeds (and ends up actually restarting slot2:
-    # config.cmd is pre-seeded so Install-Runner.ps1 no-ops, and there is
-    # no pat.secret so runner-loop.ps1 fails immediately without touching
-    # the network).
+    # (via Restart-RunnerSlot.ps1's pool-wide fallback loop, which also
+    # has to step over slot-bogus above without throwing) so restart-runner
+    # proceeds, and ends up actually restarting slot2: config.cmd is
+    # pre-seeded so Install-Runner.ps1 no-ops, and pat.secret is empty (see
+    # above) so runner-loop.ps1 fails immediately on its own PAT-is-empty
+    # check without touching the network.
     $env:FAKE_RUNNERS = '[{"name":"H-C-worm-slot1","status":"online","busy":false}]'
     $status = Invoke-Wp -WpArgs @('restart-runner', 'H-C-worm-slot2', '-HostLabel', 'H')
     if ($status -eq 0) { Write-Host 'ok   restart-runner proceeds when the pool has at least one match' }
