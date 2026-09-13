@@ -394,6 +394,13 @@ function Get-PoolStatusObject {
     } elseif ($repo) {
         foreach ($slotDir in $slotDirs) {
             $idx = Get-SlotIndex -SlotName $slotDir.Name
+            # Get-SlotRunnerName's -Index is Mandatory/[int]: a stray
+            # slot-* directory whose name isn't "slot-<digits>" (a
+            # partially-failed Start-Slot, or one made by hand) would
+            # otherwise throw here and abort list -Json for the whole
+            # host. Skip it, same as windows-pools.ps1's own
+            # Get-PoolRunnerNames does.
+            if ($null -eq $idx) { continue }
             $runnerNames += (Get-SlotRunnerName -HostLabel $HostLabel -Name $Name -Index $idx)
         }
         $stats = Get-RunnerMatchStats -Repo $repo -RunnerNames $runnerNames
@@ -402,6 +409,7 @@ function Get-PoolStatusObject {
 
     foreach ($slotDir in $slotDirs) {
         $idx = Get-SlotIndex -SlotName $slotDir.Name
+        if ($null -eq $idx) { continue }
         $total = $total + 1
         $isRunning = Test-SlotRunning -SlotDir $slotDir.FullName
         if ($isRunning) { $running = $running + 1 }

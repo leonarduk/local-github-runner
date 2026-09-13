@@ -318,6 +318,16 @@ Write-Output 'idle-ok'
     # ==================================================================
     $wp = Join-Path $tmp 'windows-pools.ps1'
 
+    # Start-RunnerPool.ps1 (unlike Restart-RunnerSlot.ps1) refuses outright
+    # if pat.secret doesn't exist at all, before launching any slot -- so
+    # 'start' needs one present to get as far as actually spawning a
+    # process. Empty, not absent: runner-loop.ps1 fails on its own
+    # PAT-is-empty check (see runner-loop.ps1's own header) before it ever
+    # reaches Invoke-RunnerApi, so this still never touches the network,
+    # the same safety the "no pat.secret" trick gives the restart-runner
+    # tests below.
+    New-Item -ItemType File -Force -Path (Join-Path $tmp 'pat.secret') | Out-Null
+
     # Every child invocation below runs through this wrapper rather than
     # `-File $wp` directly, so the fake gh module is imported (and so wins
     # over any real gh.exe on this machine's PATH -- see the Import-Module
@@ -376,6 +386,26 @@ exit `$LASTEXITCODE
     # explicitly so the computed runner names actually match them.
     Check-Wp 'start refuses an undeclared pool' 1 "no pool named 'stray'" @('start', 'stray', '-HostLabel', 'H')
     Check-Wp 'restart refuses an undeclared pool' 1 "no pool named 'stray'" @('restart', 'stray', '-HostLabel', 'H')
+
+    # 'start' actually reading repo/count from windows-pools.conf and
+    # launching a slot -- not just its undeclared-pool refusal above.
+    # 'idle' declares count 1 in $confPath ("idle   o/idle 1"), and its
+    # slot-1 is pre-seeded with a placeholder config.cmd so Install-Runner
+    # no-ops (no real download); pat.secret exists but is empty (see
+    # above), so the launched runner-loop.ps1 fails immediately on its own
+    # PAT-is-empty check, after the process (and its .pid file) already
+    # exist -- which is all this checks.
+    New-Slot -PoolDir (Join-Path $runnersRoot 'idle') -Index 1 | Out-Null
+    Check-Wp 'start reads repo/count from windows-pools.conf and launches a slot' 0 '' @('start', 'idle', '-HostLabel', 'H')
+    $idlePidFile = Join-Path $runnersRoot 'idle\slot-1\.pid'
+    if (Test-Path $idlePidFile) {
+        [void]$spawnedPids.Add((Get-Content $idlePidFile))
+        Write-Host 'ok   start launched slot-1 and recorded its pid'
+    } else { Write-Host 'FAIL start launched slot-1 and recorded its pid'; $fails++ }
+    $idleRepoFile = Join-Path $runnersRoot 'idle\.repo'
+    if ((Test-Path $idleRepoFile) -and ((Get-Content $idleRepoFile).Trim() -eq 'o/idle')) {
+        Write-Host 'ok   start recorded the repo from windows-pools.conf'
+    } else { Write-Host 'FAIL start recorded the repo from windows-pools.conf'; $fails++ }
 
     $env:FAKE_RUNNERS = '[{"name":"H-C-worm-slot1","status":"online","busy":true},{"name":"H-C-worm-slot2","status":"online","busy":false}]'
     Check-Wp 'stop refuses while a runner is busy' 3 '1 busy runner' @('stop', 'worm', '-HostLabel', 'H')
@@ -493,6 +523,26 @@ exit `$LASTEXITCODE
         } else { Write-Host "FAIL list -Json reports runners null when GitHub cannot be asked: $jsonGhFail"; $fails++ }
     } catch {
         Write-Host "FAIL list -Json (gh failing) produced invalid JSON: $_"
+        $fails++
+    }
+
+    # A pool with slots but no .repo and no conf line (like 'stray2' in the
+    # stop tests above), plus a malformed "slot-*" directory whose name
+    # doesn't parse as slot-<digits> -- Get-SlotRunnerName's -Index is
+    # Mandatory/[int], so Get-PoolStatusObject skipping a $null index (see
+    # PoolSlot.ps1) is what keeps this from throwing and aborting the
+    # whole listing.
+    New-Pool -Name 'norepo' -SlotCount 1 -RunningCount 1 | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $runnersRoot 'norepo\slot-bogus') | Out-Null
+    $jsonNoRepo = & $shellExe -NoProfile -File $wpWrapper @('list', '-Json', 'norepo') 2>&1 | Out-String
+    try {
+        $parsedNoRepo = ($jsonNoRepo | ConvertFrom-Json)[0]
+        if ($parsedNoRepo.name -eq 'norepo' -and $null -eq $parsedNoRepo.repo -and $parsedNoRepo.managed -eq $false `
+                -and $parsedNoRepo.containers.total -eq 1 -and $parsedNoRepo.members.Count -eq 1) {
+            Write-Host 'ok   list -Json handles a pool with no repo and a malformed slot directory'
+        } else { Write-Host "FAIL list -Json handles a pool with no repo and a malformed slot directory: $jsonNoRepo"; $fails++ }
+    } catch {
+        Write-Host "FAIL list -Json (no repo, malformed slot dir) produced invalid JSON: $_"
         $fails++
     }
 } finally {
