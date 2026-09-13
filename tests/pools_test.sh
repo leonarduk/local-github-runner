@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Exercises pools.sh's start/stop/restart/restart-runner/list --json against
-# stub docker and gh on PATH: no Docker daemon, no GitHub, nothing real is
-# touched.
+# Exercises pools.sh's start/stop/restart/restart-runner/scale/list --json
+# against stub docker and gh on PATH: no Docker daemon, no GitHub, nothing
+# real is touched.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -122,6 +122,23 @@ check "restart-runner an unregistered runner whose pool matches" 0 \
 check "restart-runner refuses when nothing in the pool matches" 3 "can't confirm gh-runner-stray-runner-1 is idle" -- bash "$p" restart-runner gh-runner-stray-runner-1
 check "restart-runner refuses a container that isn't a runner" 1 "isn't a runner container" -- bash "$p" restart-runner unrelated-db
 check "restart-runner refuses a container that doesn't exist" 1 "no container named 'nosuch'" -- bash "$p" restart-runner nosuch
+
+check "scale up on an idle pool" 0 \
+  "repo=o/idle project=gh-runner-idle label= mem= pids= :: up -d --build --scale runner=3" -- bash "$p" scale idle 3
+check "scale up on a pool with a busy runner succeeds" 0 \
+  "repo=o/r project=gh-runner-worm label=worm-label mem=2g pids=1024 :: up -d --build --scale runner=3" \
+  -- env FAKE_BUSY=true bash "$p" scale worm 3
+check "scale down on an idle pool" 0 \
+  "repo=o/r project=gh-runner-worm label=worm-label mem=2g pids=1024 :: up -d --build --scale runner=1" \
+  -- bash "$p" scale worm 1
+check "scale down with a busy runner refuses" 3 "1 busy runner" -- env FAKE_BUSY=true bash "$p" scale worm 1
+check "scale down --force skips the busy check" 0 \
+  "repo=o/r project=gh-runner-worm label=worm-label mem=2g pids=1024 :: up -d --build --scale runner=1" \
+  -- env FAKE_BUSY=true bash "$p" scale worm 1 --force
+check "scale refuses an undeclared pool" 1 "no pool named 'stray'" -- bash "$p" scale stray 2
+check "scale rejects a non-numeric count" 1 "usage: ./pools.sh scale" -- bash "$p" scale worm abc
+check "scale rejects an unknown option" 1 "unknown option '--bogus'" -- bash "$p" scale worm 2 --bogus
+check "scale rejects extra arguments" 1 "usage: ./pools.sh scale" -- bash "$p" scale worm 2 --force extra
 
 check "list --json counts only this pool's runners and lists its containers" 0 \
   '"name":"worm","project":"gh-runner-worm","repo":"o/r","managed":true,"desired":2,"label":"worm-label","containers":{"total":2,"running":1},"runners":{"online":1,"busy":1},"members":[{"container":"gh-runner-worm-runner-1","id":"abc123def456","state":"running","status":"Up 2 hours","runner":{"name":"somehost-abc123def456-42","status":"online","busy":true}},{"container":"gh-runner-worm-runner-2","id":"222222222222","state":"exited","status":"Exited (1) 3 minutes ago","runner":null}]}' \
