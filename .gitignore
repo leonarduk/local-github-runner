@@ -4,6 +4,8 @@ pat.secret
 .idea
 _work/
 pools.conf
+pools.conf.bak
+pools.conf.tmp
 windows-pools.conf
 windows/runners/
 windows/toolcache/

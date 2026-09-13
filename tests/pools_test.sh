@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercises pools.sh's start/stop/restart/restart-runner/scale/list --json
+# Exercises pools.sh's start/stop/restart/restart-runner/scale/sync/list --json
 # against stub docker and gh on PATH: no Docker daemon, no GitHub, nothing
 # real is touched.
 set -euo pipefail
@@ -39,16 +39,18 @@ case "$1" in
     esac ;;
   inspect)
     case "$2" in
-      gh-runner-worm-runner-1|abc123def456) id=abc123def456 proj=gh-runner-worm repo=o/r ;;
-      gh-runner-worm-runner-2|222222222222) id=222222222222 proj=gh-runner-worm repo=o/r ;;
-      gh-runner-stray-runner-1|fff000fff000) id=fff000fff000 proj=gh-runner-stray repo="${FAKE_STRAY_REPO:-o/stray}" ;;
-      unrelated-db) id=333333333333 proj=something-else repo="" ;;
+      gh-runner-worm-runner-1|abc123def456) id=abc123def456 proj=gh-runner-worm repo=o/r extra=",worm-label" ;;
+      gh-runner-worm-runner-2|222222222222) id=222222222222 proj=gh-runner-worm repo=o/r extra=",worm-label" ;;
+      gh-runner-stray-runner-1|fff000fff000) id=fff000fff000 proj=gh-runner-stray repo="${FAKE_STRAY_REPO:-o/stray}" extra=",stray-label" ;;
+      unrelated-db) id=333333333333 proj=something-else repo="" extra="" ;;
       *) echo "Error: No such object: $2" >&2; exit 1 ;;
     esac
     case "$args" in
       *compose.project*) echo "$proj" ;;
       *Hostname*) echo "$id" ;;
-      *) printf 'GITHUB_REPOSITORY=%s\n' "$repo" ;;
+      # 2g, and compose.yaml's default pids_limit.
+      *HostConfig*) echo "2147483648 512" ;;
+      *) printf 'GITHUB_REPOSITORY=%s\nRUNNER_LABELS=self-hosted,linux,x64,docker,box%s\n' "$repo" "$extra" ;;
     esac ;;
   restart) echo "docker-restart ${*:2}" ;;
   compose)
@@ -164,6 +166,31 @@ for scenario in plain awkward; do
     fails=$((fails + 1))
   fi
 done
+
+# sync rewrites its pools.conf, so it gets a copy of its own. worm's count
+# is two digits here, to check the columns after it stay put.
+unset FAKE_STRAY_REPO
+s="$tmp/sync"
+mkdir -p "$s"
+cp "$here/../pools.sh" "$s/"
+printf '# keep me\nworm   o/r    10   worm-label   2g   1024\nidle   o/idle 1\n' > "$s/pools.conf"
+cp "$s/pools.conf" "$s/original"
+{
+  printf '# keep me\nworm   o/r    2    worm-label   2g   1024\nidle   o/idle 1\n'
+  printf '%-20s %-53s %s   stray-label   2g\n' stray o/stray 1
+} > "$s/expected"
+
+check "sync --dry-run reports a changed count" 0 "worm: 10 -> 2" -- bash "$s/pools.sh" sync --dry-run
+check "sync --dry-run reports an undeclared pool" 0 "stray: added (o/stray, 1)" -- bash "$s/pools.sh" sync --dry-run
+check "sync --dry-run leaves pools.conf alone" 0 "" -- cmp "$s/pools.conf" "$s/original"
+check "sync notes a declared pool with no containers" 0 "idle: no containers here" -- bash "$s/pools.sh" sync
+check "sync rewrites counts and adds undeclared pools with their label and limits" 0 "" -- diff "$s/expected" "$s/pools.conf"
+check "sync keeps the previous pools.conf" 0 "" -- cmp "$s/pools.conf.bak" "$s/original"
+check "sync again changes nothing" 0 "already matches" -- bash "$s/pools.sh" sync
+check "an adopted pool is declared afterwards" 0 \
+  '"name":"stray","project":"gh-runner-stray","repo":"o/stray","managed":true,"desired":1,"label":"stray-label"' \
+  -- env FAKE_CID=fff000fff000 bash "$s/pools.sh" list --json stray
+check "sync rejects an unknown option" 1 "usage: ./pools.sh sync" -- bash "$s/pools.sh" sync --bogus
 
 if (( fails )); then
   echo "$fails check(s) failed"
