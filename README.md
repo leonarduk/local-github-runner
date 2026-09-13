@@ -209,6 +209,7 @@ the orchestration was not buying anything.
 ./pools.sh restart <name> [--force]                                 # stop, then start, unless a runner is busy
 ./pools.sh restart-runner <container> [--force]                     # restart one runner container, unless it is busy
 ./pools.sh scale <name> <count> [--force]                           # resize a pools.conf pool, unless shrinking would kill a busy runner
+./pools.sh sync  [--dry-run]                                        # rewrite pools.conf to match the pools running here
 ./pools.sh list  [--json [<name>...]]                               # every pool on this host, and what GitHub actually sees
 ```
 
@@ -246,6 +247,15 @@ for driving pools from something else -- a dashboard, a cron job:
   `restart`, because `docker compose up --scale` down can't be told which
   containers to kill, and a busy one dying cancels its job. `--force` skips
   that check.
+- **`sync`** goes the other way from `start`: it rewrites `pools.conf` to
+  describe the pools on this host. Each declared pool's count becomes the
+  number of containers it has (running or not -- its compose scale), and
+  each `gh-runner-*` project the file doesn't declare gets a line, with the
+  repo, extra label and mem/pids limits read off its containers, so a later
+  `start` or `restart` brings it back the same. Declared pools with no
+  containers, comments and every other column are left alone, and the old
+  file is kept as `pools.conf.bak`. `--dry-run` prints the changes without
+  writing them. It only asks docker, never GitHub.
 - **`list --json`** prints one JSON array with every pool in `pools.conf`
   plus every `gh-runner-*` project running here that `pools.conf` doesn't
   declare (`"managed": false`) -- pools started by hand, which
@@ -278,7 +288,7 @@ login, which needs admin access to the repo -- a classic token with `repo`,
 or a fine-grained one with **Administration: read**. Without it, the busy
 checks refuse and `list --json` reports `"runners": null`.
 
-`tests/pools_test.sh` exercises `start`/`stop`/`restart`/`restart-runner`/`scale`/`list --json` against stub
+`tests/pools_test.sh` exercises `start`/`stop`/`restart`/`restart-runner`/`scale`/`sync`/`list --json` against stub
 `docker` and `gh` commands, so it needs neither a Docker daemon nor GitHub.
 
 `[label]`, `[mem]` and `[pids]` are optional, trailing, and positional --

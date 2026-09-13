@@ -29,6 +29,7 @@ Usage:
   ./pools.sh restart-runner <container> [--force]
                                                   restart one runner container unless it is busy
   ./pools.sh scale <name> <count> [--force]      resize a pool pools.conf declares
+  ./pools.sh sync  [--dry-run]                   rewrite pools.conf to match the pools here
   ./pools.sh list  [--json [<name>...]]          every pool this host knows about
 
 <name> is the short label used in the project name, e.g. "jobtrack" for
@@ -76,6 +77,16 @@ never refuses -- there is nothing already running that scaling up could
 hurt. Shrinking gets the same busy check as stop/restart, since
 `docker compose up --scale` down can't be told which containers to kill,
 and killing a busy one cancels its job; --force skips that check too.
+
+sync goes the other way from start: it makes pools.conf describe what is
+on this host, not the host what pools.conf describes. Each declared pool's
+count becomes the number of containers it has (running or not -- the pool's
+compose scale), and each gh-runner-* project pools.conf doesn't declare
+gets a line, with the repo, extra label and mem/pids limits read off its
+containers, so a later start or restart brings it back the same. Declared
+pools with no containers are left alone, as are comments and every other
+column. The old file is kept as pools.conf.bak. --dry-run prints the
+changes without writing them. Only docker is asked, never GitHub.
 
 list --json prints one JSON array: every pool in pools.conf, plus every
 gh-runner-* project running here that pools.conf doesn't declare
@@ -306,6 +317,136 @@ cmd_scale() {
   cmd_up "$name" "$repo" "$count" "$label" "$mem" "$pids"
 }
 
+# docker's view of compose.yaml's default mem_limit (1g) and pids_limit, so
+# sync only writes a mem or pids column for a pool that differs from them.
+DEFAULT_MEM_BYTES=1073741824
+DEFAULT_PIDS=512
+
+# pools.conf's [label] column for a runner container: whatever its
+# RUNNER_LABELS carries past the standard self-hosted,linux,x64,docker,<host>
+# five, or "-" for nothing extra.
+container_label() {
+  local labels
+  labels="$(docker inspect "$1" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+    | sed -n 's/^RUNNER_LABELS=//p' | cut -s -d, -f6-)" || true
+  printf '%s\n' "${labels:--}"
+}
+
+# pools.conf's [mem] and [pids] columns for a runner container, "-" for one
+# at compose.yaml's default.
+container_limits() {
+  local mem="" pids=""
+  read -r mem pids < <(docker inspect "$1" \
+    --format '{{.HostConfig.Memory}} {{.HostConfig.PidsLimit}}' 2>/dev/null) || true
+  if [[ ! "$mem" =~ ^[0-9]+$ ]] || (( mem == 0 || mem == DEFAULT_MEM_BYTES )); then
+    mem=-
+  elif (( mem % 1073741824 == 0 )); then
+    mem="$((mem / 1073741824))g"
+  elif (( mem % 1048576 == 0 )); then
+    mem="$((mem / 1048576))m"
+  fi
+  [[ "$pids" =~ ^[0-9]+$ ]] && (( pids != DEFAULT_PIDS )) || pids=-
+  printf '%s %s\n' "$mem" "$pids"
+}
+
+cmd_sync() {
+  local dry=""
+  case "$#:${1:-}" in
+    0:) ;;
+    1:--dry-run) dry=1 ;;
+    *) die "usage: ./pools.sh sync [--dry-run]" ;;
+  esac
+  local all counts="" out="" changes="" notes="" seen="" had_conf=""
+  local line name proj n old head rest diff cid repo label mem pids trail
+  local count_re='^([[:space:]]*[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+)([^[:space:]]+)(.*)$'
+
+  # "<containers> <project>" per gh-runner-* project. Every container, not
+  # just running ones: the count is the pool's compose scale, which an
+  # ephemeral runner between jobs is still part of.
+  all="$(docker ps -a --format '{{.Label "com.docker.compose.project"}}')"
+  while IFS= read -r proj; do
+    [[ -z "$proj" ]] && continue
+    counts+="$(pool_cids "$proj" | wc -l | tr -d ' ') $proj"$'\n'
+  done < <(grep '^gh-runner-' <<< "$all" | sort -u || true)
+
+  if [[ -f "$POOLS_CONF" ]]; then
+    had_conf=1
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      read -r name _ <<< "$line"
+      if [[ -n "$name" && "$name" != \#* ]]; then
+        seen+="$name"$'\n'
+        n="$(awk -v p="$(project "$name")" '$2 == p { print $1 }' <<< "$counts")"
+        if [[ -z "$n" ]]; then
+          notes+="$name: no containers here -- left as pools.conf has it"$'\n'
+        elif [[ "$line" =~ $count_re ]]; then
+          head="${BASH_REMATCH[1]}" old="${BASH_REMATCH[2]}" rest="${BASH_REMATCH[3]}"
+          if [[ "$old" != "$n" ]]; then
+            # Keep any later columns where they were: take the change in
+            # width out of, or add it to, the gap after the count.
+            diff=$(( ${#n} - ${#old} ))
+            if (( diff < 0 )) && [[ -n "$rest" ]]; then
+              rest="$(printf '%*s' $(( -diff )) '')$rest"
+            elif (( diff > 0 )) && [[ "$rest" =~ ^([[:space:]]+) ]] && (( ${#BASH_REMATCH[1]} > diff )); then
+              rest="${rest:diff}"
+            fi
+            line="$head$n$rest"
+            changes+="$name: $old -> $n"$'\n'
+          fi
+        elif (( n != 2 )); then
+          # No count column, which pools.sh reads as 2.
+          line="${line%"${line##*[![:space:]]}"} $n"
+          changes+="$name: 2 (the default) -> $n"$'\n'
+        fi
+      fi
+      out+="$line"$'\n'
+    done < <(tr -d '\r' < "$POOLS_CONF")
+  fi
+
+  while read -r n proj; do
+    [[ -z "${proj:-}" ]] && continue
+    name="${proj#gh-runner-}"
+    grep -qxF "$name" <<< "$seen" && continue
+    cid="$(pool_cids "$proj" | head -1)"
+    repo="$(pool_repo "$cid")"
+    if [[ -z "$repo" || "$repo" =~ [[:space:]] ]]; then
+      notes+="$name: can't tell which repo it serves -- not added"$'\n'
+      continue
+    fi
+    label="$(container_label "$cid")"
+    read -r mem pids <<< "$(container_limits "$cid")"
+    # The trailing columns are positional: only "-"s at the end can go.
+    if [[ "$pids" != - ]]; then trail="$label $mem $pids"
+    elif [[ "$mem" != - ]]; then trail="$label $mem"
+    elif [[ "$label" != - ]]; then trail="$label"
+    else trail=""
+    fi
+    out+="$(printf '%-20s %-53s %s' "$name" "$repo" "$n")${trail:+   ${trail// /   }}"$'\n'
+    changes+="$name: added ($repo, $n)"$'\n'
+  done <<< "$counts"
+
+  if [[ -z "$changes" ]]; then
+    echo "$POOLS_CONF already matches the pools on this host"
+  else
+    printf '%s' "$changes"
+  fi
+  printf '%s' "$notes"
+  [[ -n "$changes" ]] || return 0
+  if [[ -n "$dry" ]]; then
+    echo "dry run: $POOLS_CONF not changed"
+    return 0
+  fi
+  if [[ -n "$had_conf" ]]; then
+    cp "$POOLS_CONF" "$POOLS_CONF.bak"
+  fi
+  printf '%s' "$out" > "$POOLS_CONF.tmp"
+  mv -f "$POOLS_CONF.tmp" "$POOLS_CONF"
+  if [[ -n "$had_conf" ]]; then
+    echo "wrote $POOLS_CONF (the previous one is $POOLS_CONF.bak)"
+  else
+    echo "wrote $POOLS_CONF"
+  fi
+}
+
 cmd_list() {
   local projects
   projects="$(docker ps -a --format '{{.Label "com.docker.compose.project"}}' | grep '^gh-runner-' | sort -u || true)"
@@ -410,6 +551,7 @@ case "${1:-}" in
   restart) shift; cmd_restart "$@" ;;
   restart-runner) shift; cmd_restart_runner "$@" ;;
   scale) shift; cmd_scale "$@" ;;
+  sync)  shift; cmd_sync "$@" ;;
   list)
     case "${2:-}" in
       "")     cmd_list ;;
