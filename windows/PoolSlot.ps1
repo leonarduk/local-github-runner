@@ -73,6 +73,52 @@ function Get-PoolConfLine {
     return $null
 }
 
+# Sets <Name>'s count in windows-pools.conf to <Count>, leaving every other
+# line -- comments included -- as it was. Returns the count the line had
+# before, or $null if it already said <Count> -- or if <Name> has no line
+# at all, so check that with Get-PoolConfLine first (scale does, before it
+# touches any slot). The Windows analogue of
+# pools.sh's conf_set_count(): start and restart read the count from here,
+# so without it the next one would quietly undo a scale.
+function Set-PoolConfCount {
+    param(
+        [Parameter(Mandatory)][string]$ConfPath,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][int]$Count
+    )
+    $lines = @(Get-Content -Path $ConfPath)
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $trimmed = $lines[$i].Trim()
+        if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
+        $parts = [System.Text.RegularExpressions.Regex]::Split($trimmed, '\s+')
+        if ($parts.Count -lt 2 -or $parts[0] -ne $Name) { continue }
+        # Same default as Get-PoolConfLines: no count column reads as 2.
+        $old = 2
+        if ($parts.Count -ge 3 -and $parts[2] -match '^\d+$') { $old = [int]$parts[2] }
+        if ($old -eq $Count) { return $null }
+        $m = [System.Text.RegularExpressions.Regex]::Match($lines[$i], '^(\s*\S+\s+\S+\s+)(\S+)(.*)$')
+        if ($m.Success) {
+            # Keep anything after the count where it was: take the change in
+            # width out of, or add it to, the gap after the count.
+            $rest = $m.Groups[3].Value
+            $diff = "$Count".Length - $m.Groups[2].Value.Length
+            if ($diff -lt 0 -and $rest) {
+                $rest = (' ' * (-$diff)) + $rest
+            } elseif ($diff -gt 0 -and $rest -match '^(\s+)' -and $Matches[1].Length -gt $diff) {
+                $rest = $rest.Substring($diff)
+            }
+            $lines[$i] = $m.Groups[1].Value + "$Count" + $rest
+        } else {
+            $lines[$i] = $lines[$i].TrimEnd() + " $Count"
+        }
+        $tmpPath = "$ConfPath.tmp"
+        Set-Content -Path $tmpPath -Value $lines
+        Move-Item -Force -Path $tmpPath -Destination $ConfPath
+        return $old
+    }
+    return $null
+}
+
 # The repo a pool directory says it serves, read back from .repo (written by
 # Start-Slot/Start-RunnerPool.ps1), or $null if there's no pool directory or
 # no .repo file yet.
@@ -234,6 +280,11 @@ function Assert-RunnersIdle {
         [Parameter(Mandatory)][string]$Label,
         [string]$Repo,
         [string[]]$RunnerNames,
+        # Only these of RunnerNames count as busy -- for scale, which stops
+        # some of a pool's slots rather than all of them. RunnerNames stays
+        # the whole pool, so the "nothing matches" check below keeps meaning
+        # what it means for stop.
+        [string[]]$BusyAmong,
         [switch]$HasSlots,
         [switch]$Force
     )
@@ -253,8 +304,40 @@ function Assert-RunnersIdle {
     if ($stats.Matched -eq 0) {
         Invoke-PoolRefuse "no runner on GitHub matches any of $Label's slots, so can't confirm it is idle"
     }
-    if ($stats.Busy -gt 0) {
-        Invoke-PoolRefuse "$Label has $($stats.Busy) busy runner(s); this would cancel their jobs"
+    $busy = $stats.Busy
+    if ($PSBoundParameters.ContainsKey('BusyAmong')) {
+        $busy = 0
+        foreach ($n in $BusyAmong) {
+            if ($stats.ByName.ContainsKey($n) -and $stats.ByName[$n].busy) { $busy = $busy + 1 }
+        }
+    }
+    if ($busy -gt 0) {
+        Invoke-PoolRefuse "$Label has $busy busy runner(s); this would cancel their jobs"
+    }
+}
+
+# Kills <SlotPid> and everything it started. runner-loop.ps1 runs run.cmd,
+# and run.cmd the Runner.Listener, as child processes, and Windows doesn't
+# take children down with their parent: Stop-Process on the loop alone
+# leaves a listener that is still registered and still takes jobs, for a
+# slot this host now counts as stopped. taskkill /T walks the tree.
+function Stop-SlotProcessTree {
+    param([Parameter(Mandatory)][string]$SlotPid)
+    # 'Continue' for this call only: under 'Stop', Windows PowerShell 5.1
+    # turns a native command's stderr line into a terminating error, and
+    # taskkill writes one for any process in the tree that already exited.
+    $ErrorActionPreference = 'Continue'
+    # taskkill's exit code would otherwise become the caller's
+    # $LASTEXITCODE, and windows-pools.ps1 reads that after the next script
+    # it runs as that script's own failure. Put back what was there rather
+    # than zero it, so the kill is as invisible to the caller as the
+    # Stop-Process it replaced, and can't wipe out a code the caller hasn't
+    # looked at yet.
+    $savedExitCode = $global:LASTEXITCODE
+    & taskkill.exe /PID $SlotPid /T /F *> $null
+    $global:LASTEXITCODE = $savedExitCode
+    if (Get-Process -Id $SlotPid -ErrorAction SilentlyContinue) {
+        Stop-Process -Id $SlotPid -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -300,7 +383,7 @@ function Stop-Slot {
     if (Get-Process -Id $slotPid -ErrorAction SilentlyContinue) {
         if ($Force) {
             Write-Host "Stop-Slot: $SlotLabel still running after ${TimeoutSeconds}s, forcing (-Force) -- any in-progress job is cut off"
-            Stop-Process -Id $slotPid -Force
+            Stop-SlotProcessTree -SlotPid $slotPid
         } else {
             Write-Host "Stop-Slot: $SlotLabel still running after ${TimeoutSeconds}s (likely mid-job) -- pass -Force to kill it, or wait longer"
             return $false

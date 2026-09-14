@@ -145,14 +145,16 @@ Tear a pool down:
 ## Driving pools from something else
 
 `windows-pools.ps1` also has `start` / `stop` / `restart` / `restart-runner`
-and `list -Json`, mirroring the Linux side's `pools.sh start` / `stop` /
-`restart` / `restart-runner` / `list --json` command for command:
+/ `scale` and `list -Json`, mirroring the Linux side's `pools.sh start` /
+`stop` / `restart` / `restart-runner` / `scale` / `list --json` command for
+command:
 
 ```powershell
 .\windows-pools.ps1 start <name>                        # bring one up exactly as windows-pools.conf declares it
 .\windows-pools.ps1 stop  <name> [-Force]                # tear one down, unless a runner is busy
 .\windows-pools.ps1 restart <name> [-Force]              # stop, then start, unless a runner is busy
 .\windows-pools.ps1 restart-runner <container> [-Force]  # restart one runner, unless it is busy
+.\windows-pools.ps1 scale <name> <count> [-Force]        # resize one and its count in windows-pools.conf, unless shrinking would stop a busy runner
 .\windows-pools.ps1 list -Json [<name>...]                # every pool on this host, and what GitHub actually sees
 ```
 
@@ -180,6 +182,16 @@ and `list -Json`, mirroring the Linux side's `pools.sh start` / `stop` /
   is broken. Searches every pool under `windows\runners\`, declared or not,
   the same way `pools.sh restart-runner` works on any docker container on
   the host.
+- **`scale <name> <count>`** resizes a pool `windows-pools.conf` declares.
+  Growing starts slots up to `<count>` and never refuses -- nothing running
+  is touched. Shrinking stops the slots numbered above `<count>`, highest
+  first, and deletes their directories, the way `docker compose up --scale`
+  removes containers. It refuses (exit `3`) if one of *those* slots is busy,
+  or GitHub can't be asked; `-Force` skips that check. Unlike the Linux
+  side, which can't choose which containers compose removes, a busy slot
+  the scale keeps doesn't block it. Either way `<count>` is then written
+  into the pool's `windows-pools.conf` line, so a later `start` or
+  `restart` brings it back at that size rather than undoing the scale.
 - **`list -Json`** prints one JSON array, matching `pools.sh list --json`'s
   shape field for field (`name`, `repo`, `managed`, `desired`, `label`,
   `containers`, `runners`, `members`), with two differences: `label` is
@@ -193,11 +205,11 @@ and `list -Json`, mirroring the Linux side's `pools.sh start` / `stop` /
   way back (`"Windows"`, not `"windows"` as registered), so every match
   against it is case-insensitive.
 
-`stop`, `restart`, `restart-runner` and `list -Json` read
-`repos/<owner>/<repo>/actions/runners` through the host's own `gh` login,
-same as the Linux side -- see the main README's note on the access that
-needs. Without it, the first three refuse and `list -Json` reports
-`"runners": null`.
+`stop`, `restart`, `restart-runner`, a shrinking `scale` and `list -Json`
+read `repos/<owner>/<repo>/actions/runners` through the host's own `gh`
+login, same as the Linux side -- see the main README's note on the access
+that needs. Without it, all but `list -Json` refuse, and `list -Json`
+reports `"runners": null`.
 
 `tests\windows_pools_test.ps1` exercises all of the above against a fake
 `gh` and real, harmless, locally-spawned processes standing in for slots --
@@ -223,7 +235,7 @@ One level up from this directory:
 
 | File | Role |
 |---|---|
-| `windows-pools.ps1` | `up` / `down` / `reset` / `list` / `start` / `stop` / `restart` / `restart-runner`, mirroring `pools.sh` exactly. |
+| `windows-pools.ps1` | `up` / `down` / `reset` / `list` / `start` / `stop` / `restart` / `restart-runner` / `scale`, mirroring `pools.sh` exactly. |
 | `windows-pools.conf` / `.example` | Which repos this host serves natively on Windows, mirroring `pools.conf`. |
 | `windows-startRunners.ps1` / `windows-stopRunners.ps1` | Bring the whole fleet in `windows-pools.conf` up or down at once. |
 

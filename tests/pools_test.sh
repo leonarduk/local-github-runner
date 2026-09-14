@@ -54,6 +54,7 @@ case "$1" in
     esac ;;
   restart) echo "docker-restart ${*:2}" ;;
   compose)
+    [[ -n "${FAKE_COMPOSE_FAIL:-}" ]] && { echo "compose: no Docker daemon" >&2; exit 1; }
     echo "compose repo=${GITHUB_REPOSITORY:-} project=${COMPOSE_PROJECT_NAME:-} label=${RUNNER_EXTRA_LABELS:-} mem=${POOL_MEM_LIMIT:-} pids=${POOL_PIDS_LIMIT:-} :: ${*:2}" ;;
 esac
 EOF
@@ -125,22 +126,43 @@ check "restart-runner refuses when nothing in the pool matches" 3 "can't confirm
 check "restart-runner refuses a container that isn't a runner" 1 "isn't a runner container" -- bash "$p" restart-runner unrelated-db
 check "restart-runner refuses a container that doesn't exist" 1 "no container named 'nosuch'" -- bash "$p" restart-runner nosuch
 
+# scale writes the new count into its pools.conf, so it gets a copy of its
+# own. idle has no count column here (pools.sh reads that as 2), to check
+# one gets added.
+c="$tmp/scale"
+mkdir -p "$c"
+cp "$here/../pools.sh" "$c/"
+printf '# keep me\nworm   o/r    2    worm-label   2g   1024\nidle   o/idle\n' > "$c/pools.conf"
+q="$c/pools.sh"
+
 check "scale up on an idle pool" 0 \
-  "repo=o/idle project=gh-runner-idle label= mem= pids= :: up -d --build --scale runner=3" -- bash "$p" scale idle 3
+  "repo=o/idle project=gh-runner-idle label= mem= pids= :: up -d --build --scale runner=3" -- bash "$q" scale idle 3
+check "scale adds a count to a pools.conf line that had none" 0 "" -- grep -qxF "idle   o/idle 3" "$c/pools.conf"
 check "scale up on a pool with a busy runner succeeds" 0 \
   "repo=o/r project=gh-runner-worm label=worm-label mem=2g pids=1024 :: up -d --build --scale runner=3" \
-  -- env FAKE_BUSY=true bash "$p" scale worm 3
+  -- env FAKE_BUSY=true bash "$q" scale worm 3
+check "scale writes the new count to pools.conf" 0 "" -- grep -qxF "worm   o/r    3    worm-label   2g   1024" "$c/pools.conf"
 check "scale down on an idle pool" 0 \
   "repo=o/r project=gh-runner-worm label=worm-label mem=2g pids=1024 :: up -d --build --scale runner=1" \
-  -- bash "$p" scale worm 1
-check "scale down with a busy runner refuses" 3 "1 busy runner" -- env FAKE_BUSY=true bash "$p" scale worm 1
+  -- bash "$q" scale worm 1
+check "scale says what it changed in pools.conf" 0 "pools.conf now declares worm at 10 (was 1)" -- bash "$q" scale worm 10
+check "scale keeps the columns after a wider count in place" 0 "" \
+  -- grep -qxF "worm   o/r    10   worm-label   2g   1024" "$c/pools.conf"
+check "scale leaves the other lines alone" 0 "" -- grep -qxF "# keep me" "$c/pools.conf"
+cp "$c/pools.conf" "$c/before"
+check "scale to the size pools.conf already declares" 0 ":: up -d --build --scale runner=10" -- bash "$q" scale worm 10
+check "... doesn't rewrite pools.conf" 0 "" -- cmp "$c/pools.conf" "$c/before"
+check "scale down with a busy runner refuses" 3 "1 busy runner" -- env FAKE_BUSY=true bash "$q" scale worm 1
+check "a refused scale leaves pools.conf alone" 0 "" -- cmp "$c/pools.conf" "$c/before"
+check "a failed scale fails" 1 "no Docker daemon" -- env FAKE_COMPOSE_FAIL=1 bash "$q" scale worm 11
+check "a failed scale leaves pools.conf alone" 0 "" -- cmp "$c/pools.conf" "$c/before"
 check "scale down --force skips the busy check" 0 \
   "repo=o/r project=gh-runner-worm label=worm-label mem=2g pids=1024 :: up -d --build --scale runner=1" \
-  -- env FAKE_BUSY=true bash "$p" scale worm 1 --force
-check "scale refuses an undeclared pool" 1 "no pool named 'stray'" -- bash "$p" scale stray 2
-check "scale rejects a non-numeric count" 1 "usage: ./pools.sh scale" -- bash "$p" scale worm abc
-check "scale rejects an unknown option" 1 "unknown option '--bogus'" -- bash "$p" scale worm 2 --bogus
-check "scale rejects extra arguments" 1 "usage: ./pools.sh scale" -- bash "$p" scale worm 2 --force extra
+  -- env FAKE_BUSY=true bash "$q" scale worm 1 --force
+check "scale refuses an undeclared pool" 1 "no pool named 'stray'" -- bash "$q" scale stray 2
+check "scale rejects a non-numeric count" 1 "usage: ./pools.sh scale" -- bash "$q" scale worm abc
+check "scale rejects an unknown option" 1 "unknown option '--bogus'" -- bash "$q" scale worm 2 --bogus
+check "scale rejects extra arguments" 1 "usage: ./pools.sh scale" -- bash "$q" scale worm 2 --force extra
 
 check "list --json counts only this pool's runners and lists its containers" 0 \
   '"name":"worm","project":"gh-runner-worm","repo":"o/r","managed":true,"desired":2,"label":"worm-label","containers":{"total":2,"running":1},"runners":{"online":1,"busy":1},"members":[{"container":"gh-runner-worm-runner-1","id":"abc123def456","state":"running","status":"Up 2 hours","runner":{"name":"somehost-abc123def456-42","status":"online","busy":true}},{"container":"gh-runner-worm-runner-2","id":"222222222222","state":"exited","status":"Exited (1) 3 minutes ago","runner":null}]}' \

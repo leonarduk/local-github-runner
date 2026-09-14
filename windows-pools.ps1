@@ -15,6 +15,8 @@
     .\windows-pools.ps1 stop jobtrack -Force
     .\windows-pools.ps1 restart jobtrack
     .\windows-pools.ps1 restart-runner HOST-HOST-jobtrack-slot1
+    .\windows-pools.ps1 scale jobtrack 3
+    .\windows-pools.ps1 scale jobtrack 1 -Force
 
 .NOTES
     PowerShell 5.1 compatible on purpose -- see PoolSlot.ps1's header. Every
@@ -25,12 +27,13 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory, Position = 0)]
-    [ValidateSet('up', 'down', 'reset', 'list', 'start', 'stop', 'restart', 'restart-runner')]
+    [ValidateSet('up', 'down', 'reset', 'list', 'start', 'stop', 'restart', 'restart-runner', 'scale')]
     [string]$Command,
 
     # up/reset: Name, Repo, Count. down/start/stop/restart: Name (Arg1
-    # only). restart-runner: Arg1 is the runner name. list -Json: every
-    # positional argument (Arg1/Arg2/Arg3/Rest) is a pool name to filter to.
+    # only). restart-runner: Arg1 is the runner name. scale: Name, Count
+    # (Arg1, Arg2). list -Json: every positional argument
+    # (Arg1/Arg2/Arg3/Rest) is a pool name to filter to.
     [Parameter(Position = 1)] [string]$Arg1,
     [Parameter(Position = 2)] [string]$Arg2,
     [Parameter(Position = 3)] [string]$Arg3,
@@ -196,6 +199,60 @@ switch ($Command) {
         & (Join-Path $windowsDir 'Restart-RunnerSlot.ps1') -RunnerName $runnerName -Force:$Force `
             -RunnersRoot $runnersRoot -HostLabel $HostLabel -PatFile $PatFile -RunnerVersion $RunnerVersion -Arch $Arch
         if ($LASTEXITCODE) { exit $LASTEXITCODE }
+    }
+    'scale' {
+        $name = $Arg1
+        $usage = 'usage: .\windows-pools.ps1 scale <name> <count> [-Force]'
+        if (-not $name -or -not $Arg2 -or $Arg3 -or $Rest) { Invoke-PoolDie $usage }
+        if ($Arg2 -notmatch '^\d+$') { Invoke-PoolDie "$usage -- <count> must be a non-negative integer" }
+        $count = [int]$Arg2
+        $line = Get-PoolConfLine -ConfPath $confPath -Name $name
+        if (-not $line) {
+            Invoke-PoolDie "no pool named '$name' in windows-pools.conf -- scale only works on pools declared there"
+        }
+        $poolDir = Join-Path $runnersRoot $name
+
+        # Growing starts slots up to <count> and never touches a running
+        # one, so it needs no busy check. Shrinking stops the slots numbered
+        # above <count>, and only a busy one of those would lose its job --
+        # unlike pools.sh scale, which has to check the whole pool because
+        # compose picks which containers go.
+        $removing = New-Object System.Collections.ArrayList
+        foreach ($slotDir in (Get-PoolSlotDirs -PoolDir $poolDir)) {
+            $idx = Get-SlotIndex -SlotName $slotDir.Name
+            if ($null -ne $idx -and $idx -gt $count) { [void]$removing.Add($slotDir) }
+        }
+        if ($removing.Count -gt 0) {
+            $running = @($removing | Where-Object { Test-SlotRunning -SlotDir $_.FullName })
+            $busyAmong = @($running | ForEach-Object {
+                Get-SlotRunnerName -HostLabel $HostLabel -Name $name -Index (Get-SlotIndex -SlotName $_.Name)
+            })
+            $repo = Get-PoolRepo -PoolDir $poolDir
+            if (-not $repo) { $repo = $line.Repo }
+            Assert-RunnersIdle -Label "pool '$name'" -Repo $repo -RunnerNames (Get-PoolRunnerNames -PoolDir $poolDir -Name $name) `
+                -BusyAmong $busyAmong -HasSlots:($running.Count -gt 0) -Force:$Force
+            # Highest first, and gone afterwards rather than left stopped: the
+            # way compose removes the containers a smaller --scale drops, so
+            # list -Json's slot count is the pool's size again. -Force for the
+            # same reason as stop's: an idle runner never exits on its own.
+            foreach ($slotDir in ($removing | Sort-Object -Descending { Get-SlotIndex -SlotName $_.Name })) {
+                if (Stop-Slot -SlotDir $slotDir.FullName -SlotLabel "$name $($slotDir.Name)" -Force -TimeoutSeconds 10) {
+                    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $slotDir.FullName
+                    if (Test-Path $slotDir.FullName) {
+                        Write-PoolError "stopped $name $($slotDir.Name) but couldn't delete $($slotDir.FullName) -- something still has files open in it"
+                    }
+                }
+            }
+        }
+        if ($count -gt 0) {
+            & (Join-Path $windowsDir 'Start-RunnerPool.ps1') -Name $name -Repo $line.Repo -Count $count `
+                -PatFile $PatFile -HostLabel $HostLabel -RunnerVersion $RunnerVersion -Arch $Arch
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+        }
+        # start and restart read the count from windows-pools.conf, so
+        # without this the next one would quietly undo the scale.
+        $old = Set-PoolConfCount -ConfPath $confPath -Name $name -Count $count
+        if ($null -ne $old) { Write-Host "windows-pools.conf now declares $name at $count (was $old)" }
     }
     'list' {
         if ($Json) {

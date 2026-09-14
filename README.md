@@ -208,7 +208,7 @@ the orchestration was not buying anything.
 ./pools.sh stop  <name> [--force]                                   # tear one down, unless a runner is busy
 ./pools.sh restart <name> [--force]                                 # stop, then start, unless a runner is busy
 ./pools.sh restart-runner <container> [--force]                     # restart one runner container, unless it is busy
-./pools.sh scale <name> <count> [--force]                           # resize a pools.conf pool, unless shrinking would kill a busy runner
+./pools.sh scale <name> <count> [--force]                           # resize a pools.conf pool and its count there, unless shrinking would kill a busy runner
 ./pools.sh sync  [--dry-run]                                        # rewrite pools.conf to match the pools running here
 ./pools.sh list  [--json [<name>...]]                               # every pool on this host, and what GitHub actually sees
 ```
@@ -246,7 +246,10 @@ for driving pools from something else -- a dashboard, a cron job:
   scaling up could hurt. Shrinking gets the same busy check as `stop` and
   `restart`, because `docker compose up --scale` down can't be told which
   containers to kill, and a busy one dying cancels its job. `--force` skips
-  that check.
+  that check. Once the pool is resized, `<count>` is written into its
+  `pools.conf` line -- nothing else in the file changes -- so a later
+  `start` or `restart` brings it back at the new size instead of undoing
+  the scale. A refused or failed scale leaves `pools.conf` alone.
 - **`sync`** goes the other way from `start`: it rewrites `pools.conf` to
   describe the pools on this host. Each declared pool's count becomes the
   number of containers it has (running or not -- its compose scale), and
