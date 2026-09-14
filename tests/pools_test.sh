@@ -164,6 +164,30 @@ check "scale rejects a non-numeric count" 1 "usage: ./pools.sh scale" -- bash "$
 check "scale rejects an unknown option" 1 "unknown option '--bogus'" -- bash "$q" scale worm 2 --bogus
 check "scale rejects extra arguments" 1 "usage: ./pools.sh scale" -- bash "$q" scale worm 2 --force extra
 
+# declare appends to its pools.conf, so it gets a copy of its own too: one
+# whose last line has no newline, to check the new line isn't glued on.
+d="$tmp/declare"
+mkdir -p "$d"
+cp "$here/../pools.sh" "$d/"
+printf '# keep me\nworm   o/r    2    worm-label   2g   1024' > "$d/pools.conf"
+cp "$d/pools.conf" "$d/before"
+check "declare refuses a pool that's already declared" 1 "'worm' is already declared" -- bash "$d/pools.sh" declare worm o/other
+check "declare refuses a bad name" 1 "<name> must be lowercase" -- bash "$d/pools.sh" declare Bad_Name o/r
+check "declare refuses a bad repo" 1 "must look like owner/repo" -- bash "$d/pools.sh" declare fresh not-a-repo
+check "declare refuses a bad count" 1 "must be a non-negative integer" -- bash "$d/pools.sh" declare fresh o/fresh two
+check "declare rejects extra arguments" 1 "usage: ./pools.sh declare" -- bash "$d/pools.sh" declare fresh o/fresh 1 extra
+check "a refused declare leaves pools.conf alone" 0 "" -- cmp "$d/pools.conf" "$d/before"
+check "declare adds a line" 0 "pools.conf now declares fresh (o/fresh) at 1" -- bash "$d/pools.sh" declare fresh o/fresh
+check "... on a line of its own" 0 "" -- grep -qE '^fresh +o/fresh +1$' "$d/pools.conf"
+check "... after the lines already there" 0 "" -- grep -qxF "worm   o/r    2    worm-label   2g   1024" "$d/pools.conf"
+check "a declared pool can be started" 0 \
+  "repo=o/fresh project=gh-runner-fresh label= mem= pids= :: up -d --build --scale runner=1" -- bash "$d/pools.sh" start fresh
+e="$tmp/declare-new"
+mkdir -p "$e"
+cp "$here/../pools.sh" "$e/"
+check "declare creates a missing pools.conf" 0 "now declares fresh (o/fresh) at 3" -- bash "$e/pools.sh" declare fresh o/fresh 3
+check "... with just that line" 0 "" -- grep -qE '^fresh +o/fresh +3$' "$e/pools.conf"
+
 check "list --json counts only this pool's runners and lists its containers" 0 \
   '"name":"worm","project":"gh-runner-worm","repo":"o/r","managed":true,"desired":2,"label":"worm-label","containers":{"total":2,"running":1},"runners":{"online":1,"busy":1},"members":[{"container":"gh-runner-worm-runner-1","id":"abc123def456","state":"running","status":"Up 2 hours","runner":{"name":"somehost-abc123def456-42","status":"online","busy":true}},{"container":"gh-runner-worm-runner-2","id":"222222222222","state":"exited","status":"Exited (1) 3 minutes ago","runner":null}]}' \
   -- env FAKE_BUSY=true bash "$p" list --json

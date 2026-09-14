@@ -209,6 +209,7 @@ the orchestration was not buying anything.
 ./pools.sh restart <name> [--force]                                 # stop, then start, unless a runner is busy
 ./pools.sh restart-runner <container> [--force]                     # restart one runner container, unless it is busy
 ./pools.sh scale <name> <count> [--force]                           # resize a pools.conf pool and its count there, unless shrinking would kill a busy runner
+./pools.sh declare <name> <owner/repo> [count]                      # add a pool to pools.conf, starting nothing
 ./pools.sh sync  [--dry-run]                                        # rewrite pools.conf to match the pools running here
 ./pools.sh list  [--json [<name>...]]                               # every pool on this host, and what GitHub actually sees
 ```
@@ -250,6 +251,11 @@ for driving pools from something else -- a dashboard, a cron job:
   `pools.conf` line -- nothing else in the file changes -- so a later
   `start` or `restart` brings it back at the new size instead of undoing
   the scale. A refused or failed scale leaves `pools.conf` alone.
+- **`declare <name> <owner/repo> [count]`** adds a line for a pool
+  `pools.conf` doesn't have yet -- 1 runner unless `[count]` says otherwise,
+  and the default label and limits -- so `start`, `restart` and `scale` can
+  bring it up. It starts nothing, and refuses a name that's already
+  declared.
 - **`sync`** goes the other way from `start`: it rewrites `pools.conf` to
   describe the pools on this host. Each declared pool's count becomes the
   number of containers it has (running or not -- its compose scale), and

@@ -155,6 +155,7 @@ command:
 .\windows-pools.ps1 restart <name> [-Force]              # stop, then start, unless a runner is busy
 .\windows-pools.ps1 restart-runner <container> [-Force]  # restart one runner, unless it is busy
 .\windows-pools.ps1 scale <name> <count> [-Force]        # resize one and its count in windows-pools.conf, unless shrinking would stop a busy runner
+.\windows-pools.ps1 declare <name> <owner/repo> [count] # add a pool to windows-pools.conf, starting nothing
 .\windows-pools.ps1 list -Json [<name>...]                # every pool on this host, and what GitHub actually sees
 ```
 
@@ -192,6 +193,11 @@ command:
   the scale keeps doesn't block it. Either way `<count>` is then written
   into the pool's `windows-pools.conf` line, so a later `start` or
   `restart` brings it back at that size rather than undoing the scale.
+- **`declare <name> <owner/repo> [count]`** adds a line for a pool
+  `windows-pools.conf` doesn't have yet (1 slot unless `[count]` says
+  otherwise), so `start`, `restart` and `scale` can bring it up. It starts
+  nothing, and refuses a name that's already declared. Names follow
+  `pools.sh`'s rules, so one name means the same pool on either side.
 - **`list -Json`** prints one JSON array, matching `pools.sh list --json`'s
   shape field for field (`name`, `repo`, `managed`, `desired`, `label`,
   `containers`, `runners`, `members`), with two differences: `label` is
@@ -235,7 +241,7 @@ One level up from this directory:
 
 | File | Role |
 |---|---|
-| `windows-pools.ps1` | `up` / `down` / `reset` / `list` / `start` / `stop` / `restart` / `restart-runner` / `scale`, mirroring `pools.sh` exactly. |
+| `windows-pools.ps1` | `up` / `down` / `reset` / `list` / `start` / `stop` / `restart` / `restart-runner` / `scale` / `declare`, mirroring `pools.sh` exactly. |
 | `windows-pools.conf` / `.example` | Which repos this host serves natively on Windows, mirroring `pools.conf`. |
 | `windows-startRunners.ps1` / `windows-stopRunners.ps1` | Bring the whole fleet in `windows-pools.conf` up or down at once. |
 
