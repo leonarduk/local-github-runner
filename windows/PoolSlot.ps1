@@ -75,7 +75,9 @@ function Get-PoolConfLine {
 
 # Sets <Name>'s count in windows-pools.conf to <Count>, leaving every other
 # line -- comments included -- as it was. Returns the count the line had
-# before, or $null if it already said <Count>. The Windows analogue of
+# before, or $null if it already said <Count> -- or if <Name> has no line
+# at all, so check that with Get-PoolConfLine first (scale does, before it
+# touches any slot). The Windows analogue of
 # pools.sh's conf_set_count(): start and restart read the count from here,
 # so without it the next one would quietly undo a scale.
 function Set-PoolConfCount {
@@ -325,11 +327,15 @@ function Stop-SlotProcessTree {
     # turns a native command's stderr line into a terminating error, and
     # taskkill writes one for any process in the tree that already exited.
     $ErrorActionPreference = 'Continue'
+    # taskkill's exit code would otherwise become the caller's
+    # $LASTEXITCODE, and windows-pools.ps1 reads that after the next script
+    # it runs as that script's own failure. Put back what was there rather
+    # than zero it, so the kill is as invisible to the caller as the
+    # Stop-Process it replaced, and can't wipe out a code the caller hasn't
+    # looked at yet.
+    $savedExitCode = $global:LASTEXITCODE
     & taskkill.exe /PID $SlotPid /T /F *> $null
-    # taskkill's exit code is the caller's $LASTEXITCODE otherwise, and
-    # windows-pools.ps1 reads that after the next script it runs as that
-    # script's own failure.
-    $global:LASTEXITCODE = 0
+    $global:LASTEXITCODE = $savedExitCode
     if (Get-Process -Id $SlotPid -ErrorAction SilentlyContinue) {
         Stop-Process -Id $SlotPid -Force -ErrorAction SilentlyContinue
     }

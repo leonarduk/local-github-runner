@@ -351,7 +351,12 @@ Start-Sleep -Seconds 120
         $treeSlot = Join-Path $poolForStopSlot 'slot-4'
         New-Item -ItemType Directory -Force -Path $treeSlot | Out-Null
         Set-Content -Path (Join-Path $treeSlot '.pid') -Value $parent.Id
+        # A code the caller hasn't looked at yet: taskkill must neither
+        # replace it with its own nor wipe it.
+        $global:LASTEXITCODE = 7
         [void](Stop-Slot -SlotDir $treeSlot -SlotLabel 'stopslot slot-4' -Force -TimeoutSeconds 1)
+        $afterStopSlot = $LASTEXITCODE
+        $global:LASTEXITCODE = 0
         $childAlive = $true
         for ($i = 0; $i -lt 30 -and $childAlive; $i++) {
             Start-Sleep -Milliseconds 100
@@ -360,9 +365,9 @@ Start-Sleep -Seconds 120
         if (-not $childAlive) {
             Write-Host 'ok   Stop-Slot -Force kills the slot process''s children too'
         } else { Write-Host 'FAIL Stop-Slot -Force kills the slot process''s children too'; $fails++ }
-        if ($LASTEXITCODE) {
-            Write-Host "FAIL Stop-Slot leaves `$LASTEXITCODE clear for its caller: $LASTEXITCODE"; $fails++
-        } else { Write-Host 'ok   Stop-Slot leaves $LASTEXITCODE clear for its caller' }
+        if ($afterStopSlot -ne 7) {
+            Write-Host "FAIL Stop-Slot leaves its caller's `$LASTEXITCODE as it was: $afterStopSlot"; $fails++
+        } else { Write-Host 'ok   Stop-Slot leaves its caller''s $LASTEXITCODE as it was' }
     } else { Write-Host 'FAIL Stop-Slot tree test: the parent never started its child'; $fails++ }
 
     # ==================================================================
@@ -692,6 +697,29 @@ exit `$LASTEXITCODE
     if ($status -eq 0 -and (Get-Content -Raw $confPath) -eq $confBefore) {
         Write-Host 'ok   scale to the size windows-pools.conf already declares leaves it alone'
     } else { Write-Host "FAIL scale to the size windows-pools.conf already declares leaves it alone: exit $status"; $fails++ }
+
+    # Down to 0: every slot is stopped and removed, and nothing is started
+    # again -- the one path that skips Start-RunnerPool.ps1 altogether.
+    New-Slot -PoolDir $scDir -Index 1 -Running | Out-Null
+    $env:FAKE_RUNNERS = '[{"name":"H-C-sc-slot1","status":"online","busy":false}]'
+    Check-Wp 'scale to 0 stops every slot' 0 'windows-pools.conf now declares sc at 0 (was 3)' @('scale', 'sc', '0', '-HostLabel', 'H')
+    $env:FAKE_RUNNERS = $null
+    if (@(Get-PoolSlotDirs -PoolDir $scDir).Count -eq 0 -and (Get-PoolConfLine -ConfPath $confPath -Name 'sc').Count -eq 0) {
+        Write-Host 'ok   scale to 0 removes every slot and declares 0'
+    } else { Write-Host "FAIL scale to 0 removes every slot and declares 0: $(@(Get-PoolSlotDirs -PoolDir $scDir).Count) slot(s) left"; $fails++ }
+
+    # And back up from no slots at all, with GitHub failing: nothing to
+    # remove, so nothing to ask. slot-1's placeholder config.cmd is only
+    # there so Install-Runner.ps1 doesn't download a real runner.
+    New-Slot -PoolDir $scDir -Index 1 | Out-Null
+    $env:FAKE_GH_FAIL = '1'
+    Check-Wp 'scale up from 0 never refuses' 0 'windows-pools.conf now declares sc at 1 (was 0)' @('scale', 'sc', '1', '-HostLabel', 'H')
+    $env:FAKE_GH_FAIL = $null
+    $zeroGrownPid = Join-Path $scDir 'slot-1\.pid'
+    if (Test-Path $zeroGrownPid) {
+        [void]$spawnedPids.Add((Get-Content $zeroGrownPid))
+        Write-Host 'ok   scale up from 0 starts the slot'
+    } else { Write-Host 'FAIL scale up from 0 starts the slot'; $fails++ }
 } finally {
     Cleanup
     if ($env:COMPUTERNAME_BACKUP) { $env:COMPUTERNAME = $env:COMPUTERNAME_BACKUP }
