@@ -720,6 +720,35 @@ exit `$LASTEXITCODE
         [void]$spawnedPids.Add((Get-Content $zeroGrownPid))
         Write-Host 'ok   scale up from 0 starts the slot'
     } else { Write-Host 'FAIL scale up from 0 starts the slot'; $fails++ }
+
+    # ---- declare ----
+    # Short expected substrings: Windows PowerShell 5.1 wraps a child's
+    # stderr at the console width.
+    $confBeforeDeclare = Get-Content -Raw $confPath
+    Check-Wp 'declare refuses a pool that is already declared' 1 'already declared' @('declare', 'worm', 'o/other', '-HostLabel', 'H')
+    Check-Wp 'declare refuses a bad name' 1 'lowercase' @('declare', 'Bad', 'o/bad', '-HostLabel', 'H')
+    Check-Wp 'declare refuses a bad repo' 1 'owner/repo' @('declare', 'fresh', 'nope', '-HostLabel', 'H')
+    Check-Wp 'declare refuses a bad count' 1 'non-negative' @('declare', 'fresh', 'o/fresh', 'two', '-HostLabel', 'H')
+    if ((Get-Content -Raw $confPath) -eq $confBeforeDeclare) {
+        Write-Host 'ok   a refused declare leaves windows-pools.conf alone'
+    } else { Write-Host 'FAIL a refused declare leaves windows-pools.conf alone'; $fails++ }
+
+    Check-Wp 'declare adds a line' 0 'now declares fresh (o/fresh) at 1' @('declare', 'fresh', 'o/fresh', '-HostLabel', 'H')
+    $freshLine = Get-PoolConfLine -ConfPath $confPath -Name 'fresh'
+    if ($freshLine -and $freshLine.Repo -eq 'o/fresh' -and $freshLine.Count -eq 1 `
+            -and (Get-PoolConfLine -ConfPath $confPath -Name 'worm')) {
+        Write-Host 'ok   declare adds a line for the pool and keeps the others'
+    } else { Write-Host 'FAIL declare adds a line for the pool and keeps the others'; $fails++ }
+
+    # slot-1's placeholder config.cmd is only there so Install-Runner.ps1
+    # doesn't download a real runner.
+    New-Slot -PoolDir (Join-Path $runnersRoot 'fresh') -Index 1 | Out-Null
+    Check-Wp 'a declared pool can be started' 0 '' @('start', 'fresh', '-HostLabel', 'H')
+    $freshPid = Join-Path $runnersRoot 'fresh\slot-1\.pid'
+    if (Test-Path $freshPid) {
+        [void]$spawnedPids.Add((Get-Content $freshPid))
+        Write-Host 'ok   start brings a declared pool up'
+    } else { Write-Host 'FAIL start brings a declared pool up'; $fails++ }
 } finally {
     Cleanup
     if ($env:COMPUTERNAME_BACKUP) { $env:COMPUTERNAME = $env:COMPUTERNAME_BACKUP }

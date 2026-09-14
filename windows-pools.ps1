@@ -17,6 +17,7 @@
     .\windows-pools.ps1 restart-runner HOST-HOST-jobtrack-slot1
     .\windows-pools.ps1 scale jobtrack 3
     .\windows-pools.ps1 scale jobtrack 1 -Force
+    .\windows-pools.ps1 declare jobtrack leonarduk/jobtrack 1
 
 .NOTES
     PowerShell 5.1 compatible on purpose -- see PoolSlot.ps1's header. Every
@@ -27,10 +28,10 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory, Position = 0)]
-    [ValidateSet('up', 'down', 'reset', 'list', 'start', 'stop', 'restart', 'restart-runner', 'scale')]
+    [ValidateSet('up', 'down', 'reset', 'list', 'start', 'stop', 'restart', 'restart-runner', 'scale', 'declare')]
     [string]$Command,
 
-    # up/reset: Name, Repo, Count. down/start/stop/restart: Name (Arg1
+    # up/reset/declare: Name, Repo, Count. down/start/stop/restart: Name (Arg1
     # only). restart-runner: Arg1 is the runner name. scale: Name, Count
     # (Arg1, Arg2). list -Json: every positional argument
     # (Arg1/Arg2/Arg3/Rest) is a pool name to filter to.
@@ -253,6 +254,31 @@ switch ($Command) {
         # without this the next one would quietly undo the scale.
         $old = Set-PoolConfCount -ConfPath $confPath -Name $name -Count $count
         if ($null -ne $old) { Write-Host "windows-pools.conf now declares $name at $count (was $old)" }
+    }
+    'declare' {
+        # Adds a windows-pools.conf line for a pool it doesn't have yet, so
+        # start, restart and scale can bring it up. Starts nothing.
+        $name = $Arg1
+        $repo = $Arg2
+        $usage = 'usage: .\windows-pools.ps1 declare <name> <owner/repo> [count]'
+        if (-not $name -or -not $repo -or $Rest) { Invoke-PoolDie $usage }
+        # The names pools.sh takes, so one name is one pool on either side.
+        if ($name -cnotmatch '^[a-z0-9][a-z0-9_-]{0,99}$') {
+            Invoke-PoolDie "$usage -- <name> must be lowercase letters, digits, - and _"
+        }
+        if ($repo -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
+            Invoke-PoolDie "$usage -- <owner/repo> must look like owner/repo"
+        }
+        $count = 1
+        if ($Arg3) {
+            if ($Arg3 -notmatch '^\d+$') { Invoke-PoolDie "$usage -- [count] must be a non-negative integer" }
+            $count = [int]$Arg3
+        }
+        if (Get-PoolConfLine -ConfPath $confPath -Name $name) {
+            Invoke-PoolDie "'$name' is already declared in windows-pools.conf"
+        }
+        Add-PoolConfLine -ConfPath $confPath -Name $name -Repo $repo -Count $count
+        Write-Host "windows-pools.conf now declares $name ($repo) at $count"
     }
     'list' {
         if ($Json) {

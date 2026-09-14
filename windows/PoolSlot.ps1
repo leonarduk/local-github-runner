@@ -119,6 +119,25 @@ function Set-PoolConfCount {
     return $null
 }
 
+# Appends a windows-pools.conf line declaring <Name> for <Repo> at <Count>,
+# creating the file if it isn't there -- the Windows analogue of pools.sh's
+# declare. The caller checks <Name> isn't declared already. Rewritten
+# whole, rather than appended to, so a last line with no newline can't
+# have this one glued onto it.
+function Add-PoolConfLine {
+    param(
+        [Parameter(Mandatory)][string]$ConfPath,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Repo,
+        [Parameter(Mandatory)][int]$Count
+    )
+    $lines = @()
+    if (Test-Path $ConfPath) { $lines = @(Get-Content -Path $ConfPath) }
+    $tmpPath = "$ConfPath.tmp"
+    Set-Content -Path $tmpPath -Value ($lines + ('{0,-16} {1,-28} {2}' -f $Name, $Repo, $Count))
+    Move-Item -Force -Path $tmpPath -Destination $ConfPath
+}
+
 # The repo a pool directory says it serves, read back from .repo (written by
 # Start-Slot/Start-RunnerPool.ps1), or $null if there's no pool directory or
 # no .repo file yet.

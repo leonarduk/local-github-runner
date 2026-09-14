@@ -29,6 +29,7 @@ Usage:
   ./pools.sh restart-runner <container> [--force]
                                                   restart one runner container unless it is busy
   ./pools.sh scale <name> <count> [--force]      resize a pool pools.conf declares, and its count there
+  ./pools.sh declare <name> <owner/repo> [count] add a pool to pools.conf, starting nothing
   ./pools.sh sync  [--dry-run]                   rewrite pools.conf to match the pools here
   ./pools.sh list  [--json [<name>...]]          every pool this host knows about
 
@@ -81,6 +82,11 @@ the pool is resized, <count> is written into its pools.conf line (nothing
 else in the file changes), so a later start or restart brings it back at
 the new size instead of undoing the scale. A refused or failed scale
 leaves pools.conf alone.
+
+declare <name> <owner/repo> [count] adds a pools.conf line for a pool the
+file doesn't have yet -- 1 runner unless [count] says otherwise, and the
+default label and limits -- so start, restart and scale can bring it up.
+It starts nothing, and refuses a name that's already declared.
 
 sync goes the other way from start: it makes pools.conf describe what is
 on this host, not the host what pools.conf describes. Each declared pool's
@@ -369,6 +375,25 @@ cmd_scale() {
   conf_set_count "$name" "$count"
 }
 
+# Adds a pools.conf line for a pool the file doesn't have yet, so start,
+# restart and scale can bring it up. Starts nothing.
+cmd_declare() {
+  local usage="usage: ./pools.sh declare <name> <owner/repo> [count]"
+  (( $# >= 2 && $# <= 3 )) || die "$usage"
+  local name="$1" repo="$2" count="${3:-1}"
+  [[ "$name" =~ ^[a-z0-9][a-z0-9_-]{0,99}$ ]] \
+    || die "$usage -- <name> must be lowercase letters, digits, - and _, since it becomes the compose project gh-runner-<name>"
+  [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "$usage -- <owner/repo> must look like owner/repo"
+  [[ "$count" =~ ^[0-9]+$ ]] || die "$usage -- [count] must be a non-negative integer"
+  ! conf_line "$name" >/dev/null || die "'$name' is already declared in $POOLS_CONF"
+  # A file whose last line has no newline would have this one glued onto it.
+  if [[ -s "$POOLS_CONF" && -n "$(tail -c1 "$POOLS_CONF")" ]]; then
+    echo >> "$POOLS_CONF"
+  fi
+  printf '%-20s %-53s %s\n' "$name" "$repo" "$count" >> "$POOLS_CONF"
+  echo "$POOLS_CONF now declares $name ($repo) at $count"
+}
+
 # docker's view of compose.yaml's default mem_limit (1g) and pids_limit, so
 # sync only writes a mem or pids column for a pool that differs from them.
 DEFAULT_MEM_BYTES=1073741824
@@ -595,6 +620,7 @@ case "${1:-}" in
   restart-runner) shift; cmd_restart_runner "$@" ;;
   scale) shift; cmd_scale "$@" ;;
   sync)  shift; cmd_sync "$@" ;;
+  declare) shift; cmd_declare "$@" ;;
   list)
     case "${2:-}" in
       "")     cmd_list ;;
