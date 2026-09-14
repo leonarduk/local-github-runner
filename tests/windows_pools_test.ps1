@@ -331,6 +331,40 @@ Write-Output 'idle-ok'
         Write-Host 'ok   Stop-Slot -Force actually terminated the process'
     } else { Write-Host 'FAIL Stop-Slot -Force actually terminated the process'; $fails++ }
 
+    # A slot's runner-loop.ps1 has children of its own (run.cmd, and the
+    # Runner.Listener under it), and Windows doesn't take children down
+    # with their parent: Stop-Slot -Force has to kill the whole tree, or a
+    # listener outlives its slot and keeps taking jobs.
+    $childPidFile = Join-Path $tmp 'child.pid'
+    $parentScript = Join-Path $tmp 'parent.ps1'
+    Set-Content -Path $parentScript -Value @"
+`$child = Start-Process -FilePath '$shellExe' -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 120') -WindowStyle Hidden -PassThru
+Set-Content -Path '$($childPidFile -replace "'", "''")' -Value `$child.Id
+Start-Sleep -Seconds 120
+"@
+    $parent = Start-Process -FilePath $shellExe -ArgumentList @('-NoProfile', '-File', $parentScript) -WindowStyle Hidden -PassThru
+    [void]$spawnedPids.Add($parent.Id)
+    for ($i = 0; $i -lt 100 -and -not (Test-Path $childPidFile); $i++) { Start-Sleep -Milliseconds 100 }
+    if (Test-Path $childPidFile) {
+        $childPid = [int](Get-Content $childPidFile)
+        [void]$spawnedPids.Add($childPid)
+        $treeSlot = Join-Path $poolForStopSlot 'slot-4'
+        New-Item -ItemType Directory -Force -Path $treeSlot | Out-Null
+        Set-Content -Path (Join-Path $treeSlot '.pid') -Value $parent.Id
+        [void](Stop-Slot -SlotDir $treeSlot -SlotLabel 'stopslot slot-4' -Force -TimeoutSeconds 1)
+        $childAlive = $true
+        for ($i = 0; $i -lt 30 -and $childAlive; $i++) {
+            Start-Sleep -Milliseconds 100
+            $childAlive = [bool](Get-Process -Id $childPid -ErrorAction SilentlyContinue)
+        }
+        if (-not $childAlive) {
+            Write-Host 'ok   Stop-Slot -Force kills the slot process''s children too'
+        } else { Write-Host 'FAIL Stop-Slot -Force kills the slot process''s children too'; $fails++ }
+        if ($LASTEXITCODE) {
+            Write-Host "FAIL Stop-Slot leaves `$LASTEXITCODE clear for its caller: $LASTEXITCODE"; $fails++
+        } else { Write-Host 'ok   Stop-Slot leaves $LASTEXITCODE clear for its caller' }
+    } else { Write-Host 'FAIL Stop-Slot tree test: the parent never started its child'; $fails++ }
+
     # ==================================================================
     # windows-pools.ps1 end to end
     # ==================================================================
@@ -581,6 +615,83 @@ exit `$LASTEXITCODE
         Write-Host "FAIL list -Json (no repo, malformed slot dir) produced invalid JSON: $_"
         $fails++
     }
+
+    # ---- Set-PoolConfCount, called directly ----
+    $unitConf = Join-Path $tmp 'unit-pools.conf'
+    Set-Content -Path $unitConf -Value @('# keep me', 'a   o/a   9', 'b   o/b')
+    $oldA = Set-PoolConfCount -ConfPath $unitConf -Name 'a' -Count 10
+    $oldB = Set-PoolConfCount -ConfPath $unitConf -Name 'b' -Count 3
+    $same = Set-PoolConfCount -ConfPath $unitConf -Name 'b' -Count 3
+    $got = @(Get-Content $unitConf)
+    if ($oldA -eq 9 -and $oldB -eq 2 -and $null -eq $same -and $got.Count -eq 3 -and $got[0] -eq '# keep me' `
+            -and $got[1] -eq 'a   o/a   10' -and $got[2] -eq 'b   o/b 3') {
+        Write-Host 'ok   Set-PoolConfCount rewrites one count, adds a missing one, and leaves the rest alone'
+    } else {
+        Write-Host "FAIL Set-PoolConfCount rewrites one count, adds a missing one, and leaves the rest alone: $oldA/$oldB/$same, $($got -join ' | ')"
+        $fails++
+    }
+
+    # ---- scale ----
+    # A pool of its own, appended here rather than declared at the top:
+    # scale rewrites its pool's count in windows-pools.conf, and the checks
+    # above read worm's and idle's.
+    Add-Content -Path $confPath -Value 'sc     o/sc   2'
+    $scDir = Join-Path $runnersRoot 'sc'
+
+    Check-Wp 'scale refuses an undeclared pool' 1 "no pool named 'stray'" @('scale', 'stray', '2', '-HostLabel', 'H')
+    # Just "non-negative": Windows PowerShell 5.1 wraps a child's stderr at
+    # the console width, which can split the message mid-phrase.
+    Check-Wp 'scale rejects a non-numeric count' 1 'non-negative' @('scale', 'sc', 'abc', '-HostLabel', 'H')
+    Check-Wp 'scale rejects a missing count' 1 'usage' @('scale', 'sc', '-HostLabel', 'H')
+
+    New-Pool -Name 'sc' -Repo 'o/sc' -SlotCount 3 -RunningCount 3 | Out-Null
+    $env:FAKE_RUNNERS = '[{"name":"H-C-sc-slot1","status":"online","busy":false},{"name":"H-C-sc-slot3","status":"online","busy":true}]'
+    Check-Wp 'scale down refuses when a slot it would stop is busy' 3 '1 busy runner' @('scale', 'sc', '1', '-HostLabel', 'H')
+    if ((Get-PoolConfLine -ConfPath $confPath -Name 'sc').Count -eq 2 -and (Test-SlotRunning -SlotDir (Join-Path $scDir 'slot-3'))) {
+        Write-Host 'ok   a refused scale leaves the slot running and windows-pools.conf alone'
+    } else { Write-Host 'FAIL a refused scale leaves the slot running and windows-pools.conf alone'; $fails++ }
+
+    # Only slot-1 is busy, and scaling to 1 keeps slot-1.
+    $env:FAKE_RUNNERS = '[{"name":"H-C-sc-slot1","status":"online","busy":true},{"name":"H-C-sc-slot2","status":"online","busy":false},{"name":"H-C-sc-slot3","status":"online","busy":false}]'
+    Check-Wp 'scale down only checks the slots it stops' 0 'windows-pools.conf now declares sc at 1 (was 2)' @('scale', 'sc', '1', '-HostLabel', 'H')
+    $env:FAKE_RUNNERS = $null
+    if (-not (Test-Path (Join-Path $scDir 'slot-2')) -and -not (Test-Path (Join-Path $scDir 'slot-3')) `
+            -and (Test-SlotRunning -SlotDir (Join-Path $scDir 'slot-1'))) {
+        Write-Host 'ok   scale down removes the highest slots and keeps the rest running'
+    } else { Write-Host 'FAIL scale down removes the highest slots and keeps the rest running'; $fails++ }
+    if ((Get-PoolConfLine -ConfPath $confPath -Name 'sc').Count -eq 1) {
+        Write-Host 'ok   scale writes the new count to windows-pools.conf'
+    } else { Write-Host 'FAIL scale writes the new count to windows-pools.conf'; $fails++ }
+
+    New-Slot -PoolDir $scDir -Index 2 -Running | Out-Null
+    $env:FAKE_GH_FAIL = '1'
+    Check-Wp 'scale down refuses when GitHub cannot be asked' 3 'could not ask GitHub' @('scale', 'sc', '1', '-HostLabel', 'H')
+    Check-Wp 'scale down -Force skips the busy check' 0 '' @('scale', 'sc', '1', '-Force', '-HostLabel', 'H')
+    if (-not (Test-Path (Join-Path $scDir 'slot-2'))) {
+        Write-Host 'ok   scale down -Force stops and removes the slot'
+    } else { Write-Host 'FAIL scale down -Force stops and removes the slot'; $fails++ }
+
+    # Growing never asks GitHub (still failing here): nothing running is
+    # touched. The new slots are pre-seeded with a placeholder config.cmd so
+    # Install-Runner.ps1 no-ops, and pat.secret is empty, so each
+    # runner-loop.ps1 they launch exits before any network call.
+    New-Slot -PoolDir $scDir -Index 2 | Out-Null
+    New-Slot -PoolDir $scDir -Index 3 | Out-Null
+    Check-Wp 'scale up never refuses' 0 'windows-pools.conf now declares sc at 3 (was 1)' @('scale', 'sc', '3', '-HostLabel', 'H')
+    $env:FAKE_GH_FAIL = $null
+    $grown = 0
+    foreach ($i in 2, 3) {
+        $grownPid = Join-Path $scDir "slot-$i\.pid"
+        if (Test-Path $grownPid) { [void]$spawnedPids.Add((Get-Content $grownPid)); $grown++ }
+    }
+    if ($grown -eq 2) { Write-Host 'ok   scale up starts the new slots' }
+    else { Write-Host "FAIL scale up starts the new slots: $grown of 2 started"; $fails++ }
+
+    $confBefore = Get-Content -Raw $confPath
+    $status = Invoke-Wp -WpArgs @('scale', 'sc', '3', '-HostLabel', 'H')
+    if ($status -eq 0 -and (Get-Content -Raw $confPath) -eq $confBefore) {
+        Write-Host 'ok   scale to the size windows-pools.conf already declares leaves it alone'
+    } else { Write-Host "FAIL scale to the size windows-pools.conf already declares leaves it alone: exit $status"; $fails++ }
 } finally {
     Cleanup
     if ($env:COMPUTERNAME_BACKUP) { $env:COMPUTERNAME = $env:COMPUTERNAME_BACKUP }

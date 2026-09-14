@@ -28,7 +28,7 @@ Usage:
   ./pools.sh restart <name> [--force]            stop, then start, a pool pools.conf declares
   ./pools.sh restart-runner <container> [--force]
                                                   restart one runner container unless it is busy
-  ./pools.sh scale <name> <count> [--force]      resize a pool pools.conf declares
+  ./pools.sh scale <name> <count> [--force]      resize a pool pools.conf declares, and its count there
   ./pools.sh sync  [--dry-run]                   rewrite pools.conf to match the pools here
   ./pools.sh list  [--json [<name>...]]          every pool this host knows about
 
@@ -76,7 +76,11 @@ up a pool with nothing running) is just cmd_up with the new count, so it
 never refuses -- there is nothing already running that scaling up could
 hurt. Shrinking gets the same busy check as stop/restart, since
 `docker compose up --scale` down can't be told which containers to kill,
-and killing a busy one cancels its job; --force skips that check too.
+and killing a busy one cancels its job; --force skips that check too. Once
+the pool is resized, <count> is written into its pools.conf line (nothing
+else in the file changes), so a later start or restart brings it back at
+the new size instead of undoing the scale. A refused or failed scale
+leaves pools.conf alone.
 
 sync goes the other way from start: it makes pools.conf describe what is
 on this host, not the host what pools.conf describes. Each declared pool's
@@ -129,6 +133,51 @@ conf_names() {
     [[ -z "$name" || "$name" == \#* ]] && continue
     printf '%s\n' "$name"
   done < <(tr -d '\r' < "$POOLS_CONF")
+}
+
+# A pools.conf line split around its count: everything before it, the
+# count, and everything after.
+COUNT_RE='^([[:space:]]*[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+)([^[:space:]]+)(.*)$'
+
+# <line>, one pools.conf line, with its count column set to <n>. The columns
+# after the count stay where they were: the change in width comes out of, or
+# goes into, the gap after it. A line with no count column -- which pools.sh
+# reads as 2 -- gets one appended.
+with_count() {
+  local line="$1" n="$2" head old rest diff
+  if [[ "$line" =~ $COUNT_RE ]]; then
+    head="${BASH_REMATCH[1]}" old="${BASH_REMATCH[2]}" rest="${BASH_REMATCH[3]}"
+    diff=$(( ${#n} - ${#old} ))
+    if (( diff < 0 )) && [[ -n "$rest" ]]; then
+      rest="$(printf '%*s' $(( -diff )) '')$rest"
+    elif (( diff > 0 )) && [[ "$rest" =~ ^([[:space:]]+) ]] && (( ${#BASH_REMATCH[1]} > diff )); then
+      rest="${rest:diff}"
+    fi
+    printf '%s%s%s\n' "$head" "$n" "$rest"
+  else
+    printf '%s %s\n' "${line%"${line##*[![:space:]]}"}" "$n"
+  fi
+}
+
+# Sets <name>'s count in pools.conf to <n>, leaving every other line --
+# comments included -- as it was, and says so if that changed anything.
+conf_set_count() {
+  local want="$1" n="$2" line name count out="" old="" found=""
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    read -r name _ count _ <<< "$line"
+    if [[ -z "$found" && "$name" == "$want" ]]; then
+      found=1
+      if [[ "${count:-2}" != "$n" ]]; then
+        old="${count:-2}"
+        line="$(with_count "$line" "$n")"
+      fi
+    fi
+    out+="$line"$'\n'
+  done < <(tr -d '\r' < "$POOLS_CONF")
+  [[ -n "$old" ]] || return 0
+  printf '%s' "$out" > "$POOLS_CONF.tmp"
+  mv -f "$POOLS_CONF.tmp" "$POOLS_CONF"
+  echo "$POOLS_CONF now declares $want at $n (was $old)"
 }
 
 # Short container IDs, which are also the containers' hostnames -- and so the
@@ -315,6 +364,9 @@ cmd_scale() {
   # picks which containers die, and a busy one dying cancels its job.
   (( count >= current )) || { [[ -n "${3:-}" ]] || require_idle "$name"; }
   cmd_up "$name" "$repo" "$count" "$label" "$mem" "$pids"
+  # start and restart read the count from pools.conf, so without this the
+  # next one would quietly undo the scale.
+  conf_set_count "$name" "$count"
 }
 
 # docker's view of compose.yaml's default mem_limit (1g) and pids_limit, so
@@ -357,8 +409,7 @@ cmd_sync() {
     *) die "usage: ./pools.sh sync [--dry-run]" ;;
   esac
   local all counts="" out="" changes="" notes="" seen="" had_conf=""
-  local line name proj n old head rest diff cid repo label mem pids trail
-  local count_re='^([[:space:]]*[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+)([^[:space:]]+)(.*)$'
+  local line name proj n old cid repo label mem pids trail
 
   # "<containers> <project>" per gh-runner-* project. Every container, not
   # just running ones: the count is the pool's compose scale, which an
@@ -378,23 +429,15 @@ cmd_sync() {
         n="$(awk -v p="$(project "$name")" '$2 == p { print $1 }' <<< "$counts")"
         if [[ -z "$n" ]]; then
           notes+="$name: no containers here -- left as pools.conf has it"$'\n'
-        elif [[ "$line" =~ $count_re ]]; then
-          head="${BASH_REMATCH[1]}" old="${BASH_REMATCH[2]}" rest="${BASH_REMATCH[3]}"
+        elif [[ "$line" =~ $COUNT_RE ]]; then
+          old="${BASH_REMATCH[2]}"
           if [[ "$old" != "$n" ]]; then
-            # Keep any later columns where they were: take the change in
-            # width out of, or add it to, the gap after the count.
-            diff=$(( ${#n} - ${#old} ))
-            if (( diff < 0 )) && [[ -n "$rest" ]]; then
-              rest="$(printf '%*s' $(( -diff )) '')$rest"
-            elif (( diff > 0 )) && [[ "$rest" =~ ^([[:space:]]+) ]] && (( ${#BASH_REMATCH[1]} > diff )); then
-              rest="${rest:diff}"
-            fi
-            line="$head$n$rest"
+            line="$(with_count "$line" "$n")"
             changes+="$name: $old -> $n"$'\n'
           fi
         elif (( n != 2 )); then
           # No count column, which pools.sh reads as 2.
-          line="${line%"${line##*[![:space:]]}"} $n"
+          line="$(with_count "$line" "$n")"
           changes+="$name: 2 (the default) -> $n"$'\n'
         fi
       fi
