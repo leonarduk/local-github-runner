@@ -91,11 +91,10 @@ It starts nothing, and refuses a name that's already declared.
 sync goes the other way from start: it makes pools.conf describe what is
 on this host, not the host what pools.conf describes. Each declared pool's
 count becomes the number of containers it has (running or not -- the pool's
-compose scale), and each gh-runner-* project pools.conf doesn't declare
-gets a line, with the repo, extra label and mem/pids limits read off its
-containers, so a later start or restart brings it back the same. Declared
-pools with no containers are left alone, as are comments and every other
-column. The old file is kept as pools.conf.bak. --dry-run prints the
+compose scale), so one stopped or scaled to 0 gets 0, and each gh-runner-*
+project pools.conf doesn't declare gets a line, with the repo, extra label
+and mem/pids limits read off its containers, so a later start or restart
+brings it back the same. Comments and every other column are left alone. The old file is kept as pools.conf.bak. --dry-run prints the
 changes without writing them. Only docker is asked, never GitHub.
 
 list --json prints one JSON array: every pool in pools.conf, plus every
@@ -452,9 +451,9 @@ cmd_sync() {
       if [[ -n "$name" && "$name" != \#* ]]; then
         seen+="$name"$'\n'
         n="$(awk -v p="$(project "$name")" '$2 == p { print $1 }' <<< "$counts")"
-        if [[ -z "$n" ]]; then
-          notes+="$name: no containers here -- left as pools.conf has it"$'\n'
-        elif [[ "$line" =~ $COUNT_RE ]]; then
+        # No containers here -- stopped, or scaled to 0 -- is a count of 0.
+        n="${n:-0}"
+        if [[ "$line" =~ $COUNT_RE ]]; then
           old="${BASH_REMATCH[2]}"
           if [[ "$old" != "$n" ]]; then
             line="$(with_count "$line" "$n")"

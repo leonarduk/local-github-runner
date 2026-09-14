@@ -219,17 +219,21 @@ unset FAKE_STRAY_REPO
 s="$tmp/sync"
 mkdir -p "$s"
 cp "$here/../pools.sh" "$s/"
-printf '# keep me\nworm   o/r    10   worm-label   2g   1024\nidle   o/idle 1\n' > "$s/pools.conf"
+# idle and bare are declared with no containers (stopped, or scaled to 0),
+# bare with no count column, which pools.sh reads as 2.
+printf '# keep me\nworm   o/r    10   worm-label   2g   1024\nidle   o/idle 1\nbare   o/bare\n' > "$s/pools.conf"
 cp "$s/pools.conf" "$s/original"
 {
-  printf '# keep me\nworm   o/r    2    worm-label   2g   1024\nidle   o/idle 1\n'
+  printf '# keep me\nworm   o/r    2    worm-label   2g   1024\nidle   o/idle 0\nbare   o/bare 0\n'
   printf '%-20s %-53s %s   stray-label   2g\n' stray o/stray 1
 } > "$s/expected"
 
 check "sync --dry-run reports a changed count" 0 "worm: 10 -> 2" -- bash "$s/pools.sh" sync --dry-run
 check "sync --dry-run reports an undeclared pool" 0 "stray: added (o/stray, 1)" -- bash "$s/pools.sh" sync --dry-run
 check "sync --dry-run leaves pools.conf alone" 0 "" -- cmp "$s/pools.conf" "$s/original"
-check "sync notes a declared pool with no containers" 0 "idle: no containers here" -- bash "$s/pools.sh" sync
+check "sync sets a declared pool with no containers to 0" 0 "idle: 1 -> 0" -- bash "$s/pools.sh" sync --dry-run
+check "... and one with no count column" 0 "bare: 2 (the default) -> 0" -- bash "$s/pools.sh" sync
+check "a pool synced to 0 lists as wanting 0" 0 '"name":"idle","project":"gh-runner-idle","repo":"o/idle","managed":true,"desired":0' -- bash "$s/pools.sh" list --json idle
 check "sync rewrites counts and adds undeclared pools with their label and limits" 0 "" -- diff "$s/expected" "$s/pools.conf"
 check "sync keeps the previous pools.conf" 0 "" -- cmp "$s/pools.conf.bak" "$s/original"
 check "sync again changes nothing" 0 "already matches" -- bash "$s/pools.sh" sync
