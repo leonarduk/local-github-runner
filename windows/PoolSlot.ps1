@@ -449,6 +449,19 @@ function Start-Slot {
     $labels = "self-hosted,windows,$Arch,$HostLabel"
     $log = Join-Path $logDir "slot-$Index.log"
 
+    # Point setup-python/setup-node/etc at a persistent, pre-populated tool
+    # cache (see Install-PythonToolCache.ps1) instead of the default
+    # location under this slot's own _work, which gets wiped every job.
+    # Both var names are set because different actions/toolkit versions
+    # read one or the other. Set here (rather than by each caller) so every
+    # path that (re)starts a slot -- the pool-level loop in
+    # Start-RunnerPool.ps1 and the single-slot path in
+    # Restart-RunnerSlot.ps1 -- gets it; Start-Process below inherits it
+    # from this process's environment.
+    $toolCacheDir = Join-Path (Split-Path -Parent $WindowsDir) 'windows\toolcache'
+    $env:RUNNER_TOOL_CACHE = $toolCacheDir
+    $env:AGENT_TOOLSDIRECTORY = $toolCacheDir
+
     # See Start-RunnerPool.ps1's header comment for why this falls back to
     # powershell.exe, and what that fallback requires of runner-loop.ps1.
     $shell = 'powershell'
