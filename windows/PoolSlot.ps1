@@ -462,6 +462,27 @@ function Start-Slot {
     $env:RUNNER_TOOL_CACHE = $toolCacheDir
     $env:AGENT_TOOLSDIRECTORY = $toolCacheDir
 
+    # And again in the slot's runner .env, which Runner.Listener reads
+    # itself at startup. The environment above only reaches the runner if
+    # whatever launched runner-loop.ps1 passed it down; a slot started any
+    # other way (restart-runner before this was set here, or
+    # runner-loop.ps1 run by hand) quietly used _work\_tool instead, where
+    # setup-python installed Python per-user and the _work wipe then
+    # orphaned that install's registration -- see windows/README.md,
+    # "Language runtimes". Any other lines already in .env are kept.
+    $envFile = Join-Path $slot '.env'
+    $envLines = New-Object System.Collections.ArrayList
+    if (Test-Path $envFile) {
+        foreach ($l in (Get-Content $envFile)) {
+            if ($l -notmatch '^(RUNNER_TOOL_CACHE|AGENT_TOOLSDIRECTORY)=') { [void]$envLines.Add($l) }
+        }
+    }
+    [void]$envLines.Add("RUNNER_TOOL_CACHE=$toolCacheDir")
+    [void]$envLines.Add("AGENT_TOOLSDIRECTORY=$toolCacheDir")
+    # WriteAllLines rather than Set-Content: UTF-8 without a BOM under both
+    # 5.1 and 7, where 5.1's Set-Content would write ANSI.
+    [System.IO.File]::WriteAllLines($envFile, [string[]]$envLines.ToArray())
+
     # See Start-RunnerPool.ps1's header comment for why this falls back to
     # powershell.exe, and what that fallback requires of runner-loop.ps1.
     $shell = 'powershell'

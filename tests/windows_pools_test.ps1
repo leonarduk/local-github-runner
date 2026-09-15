@@ -453,7 +453,17 @@ exit `$LASTEXITCODE
     # PAT-is-empty check, after the process (and its .pid file) already
     # exist -- which is all this checks.
     New-Slot -PoolDir (Join-Path $runnersRoot 'idle') -Index 1 | Out-Null
+    # A .env already there: Start-Slot should replace a stale toolcache
+    # line and keep anything else.
+    $idleEnvFile = Join-Path $runnersRoot 'idle\slot-1\.env'
+    Set-Content -Path $idleEnvFile -Value @('KEEP_ME=1', 'RUNNER_TOOL_CACHE=C:\stale')
     Check-Wp 'start reads repo/count from windows-pools.conf and launches a slot' 0 '' @('start', 'idle', '-HostLabel', 'H')
+    $wantToolCache = Join-Path $tmp 'windows\toolcache'
+    $envGot = @(Get-Content $idleEnvFile)
+    if (($envGot -contains "RUNNER_TOOL_CACHE=$wantToolCache") -and ($envGot -contains "AGENT_TOOLSDIRECTORY=$wantToolCache") `
+            -and ($envGot -contains 'KEEP_ME=1') -and -not ($envGot -contains 'RUNNER_TOOL_CACHE=C:\stale')) {
+        Write-Host 'ok   start writes the toolcache into the slot''s runner .env'
+    } else { Write-Host "FAIL start writes the toolcache into the slot's runner .env: $($envGot -join ' | ')"; $fails++ }
     $idlePidFile = Join-Path $runnersRoot 'idle\slot-1\.pid'
     if (Test-Path $idlePidFile) {
         [void]$spawnedPids.Add((Get-Content $idlePidFile))
