@@ -221,8 +221,11 @@ reports `"runners": null`.
 `gh` and real, harmless, locally-spawned processes standing in for slots --
 no Docker daemon to fake here, and nothing real is touched either. Run it
 with `pwsh -File tests\windows_pools_test.ps1`, or `powershell.exe -File
-tests\windows_pools_test.ps1` where `pwsh` isn't on `PATH` -- both are
-exercised in CI.
+tests\windows_pools_test.ps1` where `pwsh` isn't on `PATH`. CI runs both:
+`.github\workflows\powershell-tests.yml` runs every `tests\*_test.ps1`
+on `windows-latest`, once under Windows PowerShell 5.1 and once under
+PowerShell 7, so a new test there is picked up without editing the
+workflow.
 
 ## The pieces
 
