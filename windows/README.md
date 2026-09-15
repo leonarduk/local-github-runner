@@ -232,7 +232,7 @@ workflow.
 | File | Role |
 |---|---|
 | `Install-Runner.ps1` | Downloads, SHA256-verifies, and unpacks the runner zip into a slot directory. Run automatically by `Start-RunnerPool.ps1`; call it directly only to pre-stage a slot or bump the version. |
-| `Install-PythonToolCache.ps1` | Downloads, SHA256-verifies, and per-user-installs one Python version into `windows\toolcache\`, the shared, persistent tool cache `Start-RunnerPool.ps1` points `RUNNER_TOOL_CACHE`/`AGENT_TOOLSDIRECTORY` at. Not run automatically -- see "Language runtimes" below. |
+| `Install-PythonToolCache.ps1` | Downloads, SHA256-verifies, and per-user-installs one Python version into `windows\toolcache\`, the shared, persistent tool cache every slot's `RUNNER_TOOL_CACHE`/`AGENT_TOOLSDIRECTORY` points at. First removes a stale per-user registration of the same version, which would otherwise make the installer install nothing. Not run automatically -- see "Language runtimes" below. |
 | `Install-NodeToolCache.ps1` | Same idea, for Node: downloads, SHA256-verifies (against Node's own published `SHASUMS256.txt`), and unpacks one Node version into the same tool cache. Not run automatically. |
 | `runner-loop.ps1` | The actual ephemeral loop: mint a registration token, `config.cmd`, `run.cmd`, deregister, repeat. One process per slot. The Windows analogue of `entrypoint.sh`. |
 | `Start-RunnerPool.ps1` | Brings up `-Count` slots for one repo as hidden background processes, logging to `windows\runners\<name>\logs\`. The Windows analogue of `pools.sh up`. |
@@ -258,10 +258,14 @@ runs unelevated (see "What this does not give you" above), so that install
 fails -- job logs show `Requested registry access is not allowed` followed by
 the installer exe not being found.
 
-The fix is to make sure it's never a cache miss. `Start-RunnerPool.ps1`
-points `RUNNER_TOOL_CACHE`/`AGENT_TOOLSDIRECTORY` at `windows\toolcache\`, a
+The fix is to make sure it's never a cache miss. `Start-Slot` (in
+`PoolSlot.ps1`, behind every path that starts a slot) points
+`RUNNER_TOOL_CACHE`/`AGENT_TOOLSDIRECTORY` at `windows\toolcache\`, a
 persistent directory outside any slot's ephemeral `_work` (which gets wiped
-every job). Pre-populate it once per runtime/version a workflow needs:
+every job). It sets them in the runner process's environment and also
+writes them to the slot's runner `.env`, which the runner reads itself, so a
+slot keeps them however it was started. Pre-populate the cache once per
+runtime/version a workflow needs:
 
 ```powershell
 # Python: default version (3.11.9) has a pinned checksum baked in; any other
@@ -303,6 +307,88 @@ in `windows-pools.conf`. Caching these ahead of time just means the first
 Windows job either repo ever adds won't hit the cache-miss failure
 cicaid-pro's did (see the "Language runtimes" intro above); it fixes
 nothing currently broken.
+
+### When a job still misses the cache
+
+Check two things, in this order:
+
+1. **Which tool cache the job actually used.** The runner logs it for every
+   job:
+
+   ```powershell
+   Select-String -Path windows\runners\<pool>\slot-1\_diag\Worker_*.log -Pattern "Well known directory 'Tools'"
+   ```
+
+   It should say `windows\toolcache`. `...\slot-N\_work\_tool` means that
+   slot's runner started without the setting. Restart it with
+   `windows-pools.ps1 restart-runner`, which rewrites the slot's `.env`.
+2. **Whether the version is actually cached.**
+   `windows\toolcache\Python\<version>\<arch>\python.exe` and the
+   `<arch>.complete` file next to that directory must both exist. A
+   directory holding only the downloaded installer, or nothing at all, is a
+   miss.
+
+### `Install-PythonToolCache.ps1` reports success but installs nothing
+
+The python.org installer is a bundle of per-user MSI packages. It decides
+what to do from what Windows Installer says is registered for this user, not
+from what is on disk. If this Python version is registered as installed
+somewhere else, it plans no work, exits 0, and leaves
+`windows\toolcache\Python\<version>\<arch>` empty. Its log
+(`%TEMP%\Python 3.11.9 (64-bit)_*.log`) shows
+`Detected package: core_JustForMe, state: Present` and `execute: None`.
+
+That happened on 2026-09-15. A cicaid-pro slot restarted with
+`restart-runner`, before `Start-Slot` set the tool cache itself, ran its
+jobs with `_work\_tool` as the tool cache. On that cache miss `setup-python`
+installed 3.11.9 per-user into
+`slot-1\_work\_tool\Python\3.11.9\x64`. `runner-loop.ps1` wipes `_work`
+before every job, which deleted the files but left the registration:
+`HKCU\Software\Python\PythonCore\3.11\InstallPath` still pointed there, and
+`py -0p` still listed it. Every later install attempt then did nothing.
+`-Force` could cause the same thing on its own: it used to delete the cached
+files before running the installer, which then found its own registration
+still there.
+
+The script now checks before it installs. Suppose a registration of the
+same version points at a directory with no `python.exe`, or at the cache
+directory it is about to reinstall. Then the script removes that
+registration first: the bundle's own `/uninstall /quiet`, then `msiexec /x`
+for any component products still left. If the registration points at a
+working Python somewhere else, the script stops and names the path instead
+of uninstalling it. Rerun with `-RemoveExisting` to let it uninstall. The script also
+won't mark a version cached until its `python.exe` can import the standard
+library. On 2026-09-15 one reinstall left a `python.exe` with no `Lib\`, and
+`python --version` passed anyway. If the installer exits 0 without producing
+a working `python.exe`, the error names the installer log and lists the
+`*_JustForMe` packages it found already installed.
+
+To clean up by hand, list every component product still registered, with
+the product codes `msiexec` takes, and uninstall **all** of them.
+Uninstalling only Core Interpreter and Executables is not enough. On
+2026-09-15 that left the standard library registered, and the reinstall
+produced a `python.exe` with no `Lib\`:
+
+```powershell
+. .\windows\Install-PythonToolCache.ps1   # defines the functions, installs nothing
+(Get-PythonUserRegistration -Version 3.11.9 -Arch x64).Products
+msiexec /x {B074012B-9B85-4049-BA01-A58A8C4C2236} /qn   # e.g. Python 3.11.9 Core Interpreter (64-bit)
+msiexec /x {C038789C-DCB5-42D3-8C51-3BC9DDB26B90} /qn   # e.g. Python 3.11.9 Executables (64-bit)
+```
+
+`1605` means that product isn't installed. A `1603` has succeeded on a
+second try. Once nothing is listed, rerun `Install-PythonToolCache.ps1`.
+
+If the reinstall itself then fails with `1603` (the log shows an internal MSI
+error after `FindRelatedProducts`), leftover per-user installs of other
+patch releases of the same minor version (3.11.0 and 3.11.8 here) can be the
+cause. The last resort that worked on 2026-09-15: an administrative extract
+of each signed component MSI from
+`%LOCALAPPDATA%\Package Cache\{guid}v3.11.9150.0\` with
+`msiexec /a <msi> TARGETDIR=<toolcache>\Python\3.11.9\x64 /qn`, which
+unpacks files without registering anything. Then run
+`python -m ensurepip --default-pip`, and write `x64.complete` by hand only
+after `python -c "import encodings, ssl, sqlite3, venv"` passes.
 
 ## Runtime state
 
