@@ -1,0 +1,45 @@
+name: PowerShell Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  powershell-tests:
+    name: PowerShell Tests
+    # windows-latest for the same reason as powershell-parse.yml: it is the
+    # only runner image carrying both `powershell` (Windows PowerShell 5.1)
+    # and `pwsh` (7+). The parse check catches 7-only *syntax*. This job is
+    # the one that would catch a 7-only cmdlet or parameter, which parses
+    # fine under 5.1 and then fails the moment it runs.
+    #
+    # The tests are network-free and touch only a temp dir: a fake gh, and
+    # harmless local processes standing in for runner slots. See each
+    # tests\*_test.ps1 header.
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      # Two named steps rather than a matrix over `shell:`, and
+      # `exit $LASTEXITCODE` after the script call, both for the reasons
+      # powershell-parse.yml gives. The check name says which shell failed,
+      # and without the explicit exit the script's `exit 1` is swallowed
+      # and the step goes green over failing tests.
+      - name: Test under Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          ./.github/scripts/Invoke-PowerShellTests.ps1
+          exit $LASTEXITCODE
+
+      # Runs even when 5.1 has already failed. "Fails under both" and
+      # "fails only under 5.1" point at different bugs.
+      - name: Test under PowerShell 7+
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          ./.github/scripts/Invoke-PowerShellTests.ps1
+          exit $LASTEXITCODE
