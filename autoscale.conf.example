@@ -1,0 +1,14 @@
+# The pools `./pools.sh autoscale` resizes. One line per pool:
+#
+#   cp autoscale.conf.example autoscale.conf   # gitignored, edit freely
+#
+# <name> must also be declared in pools.conf, which still supplies the repo,
+# label and limits; its count there is ignored while it's autoscaled.
+# <min> is kept warm even with nothing queued -- 1 saves the first job the
+# 30-60s a runner takes to start and register. [idle_minutes] is how long a
+# pool must have no busy runner and no queued job before it drops back to
+# <min>; 10 if omitted.
+#
+# name               min  max  idle_minutes
+issue-worm-pro       1    8
+sing-attune          0    3    5

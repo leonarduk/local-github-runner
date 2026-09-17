@@ -145,9 +145,11 @@ here, most of which cost somebody an afternoon to find.
 
 If you need something else, use something else:
 
-- **Kubernetes, autoscaling, or more than one team** ->
+- **Kubernetes, autoscaling across a cluster, or more than one team** ->
   [actions-runner-controller](https://github.com/actions/actions-runner-controller),
-  which is the supported answer and does all of that properly.
+  which is the supported answer and does all of that properly. Resizing
+  one host's pools to their queued jobs is covered: see
+  [Autoscaling a host's pools](#autoscaling-a-hosts-pools).
 - **A public repository** -> nothing here, and see the next section. This is
   not a limitation to work around; it is the one hard rule.
 - **macOS jobs** -> not covered by anything in this repo.
@@ -212,6 +214,7 @@ the orchestration was not buying anything.
 ./pools.sh declare <name> <owner/repo> [count]                      # add a pool to pools.conf, starting nothing
 ./pools.sh sync  [--dry-run]                                        # rewrite pools.conf to match the pools running here
 ./pools.sh list  [--json [<name>...]]                               # every pool on this host, and what GitHub actually sees
+./pools.sh autoscale [--once] [--dry-run] [--interval <seconds>]    # resize autoscale.conf's pools to their queued jobs
 ```
 
 `<name>` is just the label in the project name (`gh-runner-<name>`); it need
@@ -297,8 +300,59 @@ login, which needs admin access to the repo -- a classic token with `repo`,
 or a fine-grained one with **Administration: read**. Without it, the busy
 checks refuse and `list --json` reports `"runners": null`.
 
-`tests/pools_test.sh` exercises `start`/`stop`/`restart`/`restart-runner`/`scale`/`sync`/`list --json` against stub
+`tests/pools_test.sh` exercises `start`/`stop`/`restart`/`restart-runner`/`scale`/`sync`/`list --json`/`autoscale` against stub
 `docker` and `gh` commands, so it needs neither a Docker daemon nor GitHub.
+
+### Autoscaling a host's pools
+
+A fixed count is always wrong for somebody: too many runners holding memory
+while nothing is queued, or too few while jobs wait behind each other.
+`./pools.sh autoscale` resizes the pools listed in `autoscale.conf` to what is
+actually queued:
+
+```bash
+cp autoscale.conf.example autoscale.conf   # gitignored; one "<name> <min> <max> [idle_minutes]" line per pool
+./pools.sh autoscale --once --dry-run      # what it would do right now, changing nothing
+./pools.sh autoscale                       # every 60s until stopped; --interval to change that
+```
+
+Every pass, for each listed pool:
+
+- **Demand** is the jobs queued in its repo -- in queued runs, and in runs
+  already in progress with jobs still waiting -- whose `runs-on` labels this
+  pool's runners carry, including this host's `RUNNER_HOST_LABEL`. A job
+  more than one `pools.conf` pool could take counts against the one with the
+  fewest labels, so a pool reserved by an extra label (`issue-worm`) doesn't
+  grow for the generic jobs its repo's plain CI pool is there for.
+- **Growing**: to busy runners plus queued jobs, capped at `<max>`, when that
+  is more containers than the pool has, and never below `<min>`. Containers
+  still starting count as capacity, so a job that stays queued while its
+  runner boots doesn't grow the pool a second time.
+- **Shrinking**: to `<min>` once the pool has had no busy runner and no
+  queued job for `[idle_minutes]` (10 by default), and only after the same
+  busy check `stop` makes. The idle clock is kept in `.autoscale-state`, so
+  it survives from one pass to the next. A pool with any busy runner is not
+  shrunk at all, because `docker compose up --scale` can't be told which
+  containers to remove.
+- A pool whose repo GitHub can't be asked about is left as it is.
+
+It resizes with the same `docker compose up --scale` as `scale`, and never
+writes `pools.conf`: that file's count is still what `start` and `restart`
+use, and the next pass corrects it. Each pass reads the runs, their jobs and
+the runners of every autoscaled repo -- a few API calls per repo per
+minute, well inside the 5,000 an hour a token gets.
+
+Two hosts serving the same repo each see the same queued job, so each may
+add a runner for it; the spare one sits idle and goes again after
+`[idle_minutes]`. Nothing here sizes memory or CPU yet: a pool still gets
+its `pools.conf` `[mem]`/`[pids]` limits.
+
+Keep it running the way you keep anything else on the host running -- a
+systemd unit, or at the least:
+
+```bash
+nohup ./pools.sh autoscale >> autoscale.log 2>&1 &
+```
 
 `[label]`, `[mem]` and `[pids]` are optional, trailing, and positional --
 pass `-` for one you want to leave at its default so a later one still lands

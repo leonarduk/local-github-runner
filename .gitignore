@@ -6,6 +6,8 @@ _work/
 pools.conf
 pools.conf.bak
 pools.conf.tmp
+autoscale.conf
+.autoscale-state
 windows-pools.conf
 windows/runners/
 windows/toolcache/
