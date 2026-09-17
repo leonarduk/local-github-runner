@@ -60,10 +60,17 @@ esac
 EOF
 
 # One runner for FAKE_CID's container, plus a busy runner on another host
-# that must never be counted against this host's pools.
+# that must never be counted against this host's pools. For autoscale: one
+# queued run whenever FAKE_JOBS is set, whose queued jobs are FAKE_JOBS's
+# ;-separated label lists, in every repo.
 cat > "$tmp/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 [[ -n "${FAKE_GH_FAIL:-}" ]] && exit 1
+case "$*" in
+  *"runs?status=queued"*) if [[ -n "${FAKE_JOBS:-}" ]]; then echo 100; fi; exit 0 ;;
+  *"runs?status=in_progress"*) exit 0 ;;
+  *"/jobs"*) tr ';' '\n' <<< "${FAKE_JOBS:-}"; exit 0 ;;
+esac
 echo "somehost-${FAKE_CID:-abc123def456}-42 online ${FAKE_BUSY:-false}"
 echo "otherhost-999999999999-1 online true"
 EOF
@@ -241,6 +248,110 @@ check "an adopted pool is declared afterwards" 0 \
   '"name":"stray","project":"gh-runner-stray","repo":"o/stray","managed":true,"desired":1,"label":"stray-label"' \
   -- env FAKE_CID=fff000fff000 bash "$s/pools.sh" list --json stray
 check "sync rejects an unknown option" 1 "usage: ./pools.sh sync" -- bash "$s/pools.sh" sync --bogus
+
+# check_absent <description> <expected exit> <output that must NOT appear> -- <command...>
+check_absent() {
+  local desc="$1" want_status="$2" unwanted="$3"
+  shift 4
+  local out status=0
+  out="$("$@" 2>&1)" || status=$?
+  if [[ "$status" == "$want_status" && "$out" != *"$unwanted"* ]]; then
+    echo "ok   $desc"
+  else
+    echo "FAIL $desc: exit $status (want $want_status), output: $out"
+    fails=$((fails + 1))
+  fi
+}
+
+# autoscale: worm (2 containers, extra label) and plain (none) both serve
+# o/r, so a generic job belongs to plain; idle serves o/idle with nothing
+# running. The stub containers carry host label "box".
+a="$tmp/autoscale"
+mkdir -p "$a"
+cp "$here/../pools.sh" "$a/"
+printf 'worm   o/r    2   worm-label   2g   1024\nplain  o/r    0\nidle   o/idle 0\n' > "$a/pools.conf"
+cp "$a/pools.conf" "$a/pools.conf.orig"
+as="$a/pools.sh"
+export RUNNER_HOST_LABEL=box
+worm_job="self-hosted,worm-label"
+
+check "autoscale refuses without autoscale.conf" 1 "no autoscale.conf" -- bash "$as" autoscale --once
+printf '# name min max idle\nworm 1 3 0\nidle 0 2\n' > "$a/autoscale.conf"
+check "autoscale rejects an unknown option" 1 "usage: ./pools.sh autoscale" -- bash "$as" autoscale --bogus
+check "autoscale rejects a bad interval" 1 "must be a positive integer" -- bash "$as" autoscale --interval 0
+
+check "autoscale grows a pool to its busy + queued jobs, capped at max" 0 \
+  "worm: 2 containers, 1 busy, 3 queued -> 3 (3 queued, 1 busy)" \
+  -- env FAKE_BUSY=true FAKE_JOBS="$worm_job;$worm_job;$worm_job" bash "$as" autoscale --once
+check "... through compose, with the pool's pools.conf label and limits" 0 \
+  "repo=o/r project=gh-runner-worm label=worm-label mem=2g pids=1024 :: up -d --build --scale runner=3" \
+  -- env FAKE_BUSY=true FAKE_JOBS="$worm_job;$worm_job;$worm_job" bash "$as" autoscale --once
+check "autoscale doesn't grow for a job its idle containers can take" 0 \
+  "worm: 2 containers, 1 busy, 1 queued -> 2 (steady)" \
+  -- env FAKE_BUSY=true FAKE_JOBS="$worm_job" bash "$as" autoscale --once
+check "a job the plain pool can take doesn't count against the labelled one" 0 \
+  "worm: 2 containers, 1 busy, 0 queued -> 2 (steady)" \
+  -- env FAKE_BUSY=true FAKE_JOBS="self-hosted,linux" bash "$as" autoscale --once
+check "a job for another host's runners counts against nothing here" 0 \
+  "worm: 2 containers, 1 busy, 0 queued -> 2 (steady)" \
+  -- env FAKE_BUSY=true FAKE_JOBS="self-hosted,otherbox,worm-label" bash "$as" autoscale --once
+check "a GitHub-hosted job counts against nothing" 0 \
+  "worm: 2 containers, 1 busy, 0 queued -> 2 (steady)" \
+  -- env FAKE_BUSY=true FAKE_JOBS="ubuntu-latest" bash "$as" autoscale --once
+check "autoscale brings a pool at 0 up for a queued job" 0 \
+  "repo=o/idle project=gh-runner-idle label= mem= pids= :: up -d --build --scale runner=1" \
+  -- env FAKE_BUSY=true FAKE_JOBS="self-hosted,linux" bash "$as" autoscale --once
+check "autoscale shrinks an idle pool to min" 0 \
+  "repo=o/r project=gh-runner-worm label=worm-label mem=2g pids=1024 :: up -d --build --scale runner=1" \
+  -- bash "$as" autoscale --once
+check_absent "... but not when the busy check can't confirm it's idle" 0 ":: up -d" \
+  -- env FAKE_CID=000000000000 bash "$as" autoscale --once
+check "... and says so" 0 "worm: not shrinking after all" \
+  -- env FAKE_CID=000000000000 bash "$as" autoscale --once
+check_absent "--dry-run changes nothing" 0 ":: up -d" -- bash "$as" autoscale --once --dry-run
+check "... but says what it would do" 0 "worm: 2 containers, 0 busy, 0 queued -> 1 (idle 0m)" \
+  -- bash "$as" autoscale --once --dry-run
+check_absent "autoscale leaves pools alone when GitHub can't be asked" 0 ":: up -d" \
+  -- env FAKE_GH_FAIL=1 bash "$as" autoscale --once
+check "... and says so" 0 "worm: could not ask GitHub about o/r -- left as it is" \
+  -- env FAKE_GH_FAIL=1 bash "$as" autoscale --once
+
+printf 'worm 3 5\n' > "$a/autoscale.conf"
+check "autoscale raises a pool below min" 0 "worm: 2 containers, 0 busy, 0 queued -> 3 (below min 3)" \
+  -- bash "$as" autoscale --once
+
+printf 'worm 1 2 0\n' > "$a/autoscale.conf"
+check "autoscale says when queued jobs meet max" 0 "worm: 2 containers, 1 busy, 3 queued -> 2 (3 queued, but at max 2)" \
+  -- env FAKE_BUSY=true FAKE_JOBS="$worm_job;$worm_job;$worm_job" bash "$as" autoscale --once
+
+printf 'worm 1 3 5\nghost 0 2\nplain 3 1\n' > "$a/autoscale.conf"
+rm -f "$a/.autoscale-state"
+check "autoscale skips a pool pools.conf doesn't declare" 0 "ghost: not in pools.conf -- skipped" \
+  -- bash "$as" autoscale --once
+check "autoscale skips a line with min > max" 0 "plain: needs <min> <max> [idle_minutes]" -- bash "$as" autoscale --once
+rm -f "$a/.autoscale-state"
+check_absent "an idle pool waits out its idle minutes" 0 ":: up -d" -- bash "$as" autoscale --once
+check "... counting down" 0 "idle, down to 1 in" -- bash "$as" autoscale --once
+check "... remembered between passes" 0 "" -- grep -qE '^worm [0-9]+$' "$a/.autoscale-state"
+printf 'worm %s\n' "$(( $(date +%s) - 301 ))" > "$a/.autoscale-state"
+check "... then shrinks" 0 ":: up -d --build --scale runner=1" -- bash "$as" autoscale --once
+check "... and forgets it" 0 "" -- bash -c "! grep -q worm '$a/.autoscale-state'"
+printf 'worm %s\n' "$(( $(date +%s) - 120 ))" > "$a/.autoscale-state"
+check "a busy runner resets the idle clock" 0 "worm: 2 containers, 1 busy" -- env FAKE_BUSY=true bash "$as" autoscale --once
+check "... so it's forgotten" 0 "" -- bash -c "! grep -q worm '$a/.autoscale-state'"
+check "autoscale never rewrites pools.conf" 0 "" -- cmp "$a/pools.conf" "$a/pools.conf.orig"
+
+unset RUNNER_HOST_LABEL
+host_job="self-hosted,box,worm-label"
+printf 'RUNNER_HOST_LABEL=box\n' > "$a/.env"
+check "autoscale reads the host label from .env" 0 "worm: 2 containers, 1 busy, 1 queued" \
+  -- env FAKE_BUSY=true FAKE_JOBS="$host_job" bash "$as" autoscale --once --dry-run
+printf 'RUNNER_HOST_LABEL="box"\n' > "$a/.env"
+check "... with the quotes compose would strip" 0 "worm: 2 containers, 1 busy, 1 queued" \
+  -- env FAKE_BUSY=true FAKE_JOBS="$host_job" bash "$as" autoscale --once --dry-run
+rm -f "$a/.env"
+check "... and none without one" 0 "worm: 2 containers, 1 busy, 0 queued" \
+  -- env FAKE_BUSY=true FAKE_JOBS="$host_job" bash "$as" autoscale --once --dry-run
 
 if (( fails )); then
   echo "$fails check(s) failed"

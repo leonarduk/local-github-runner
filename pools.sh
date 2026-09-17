@@ -32,6 +32,8 @@ Usage:
   ./pools.sh declare <name> <owner/repo> [count] add a pool to pools.conf, starting nothing
   ./pools.sh sync  [--dry-run]                   rewrite pools.conf to match the pools here
   ./pools.sh list  [--json [<name>...]]          every pool this host knows about
+  ./pools.sh autoscale [--once] [--dry-run] [--interval <seconds>]
+                                                  resize autoscale.conf's pools to their queued jobs
 
 <name> is the short label used in the project name, e.g. "jobtrack" for
 gh-runner-jobtrack. It does not have to match the repo name.
@@ -107,6 +109,17 @@ repo are told apart; it is null when GitHub couldn't be asked. Names after
 --json limit it to those pools -- worth doing from anything that polls,
 since every pool costs a GitHub API call; a name that is neither declared
 nor running is left out.
+
+autoscale resizes the pools autoscale.conf lists (one "<name> <min> <max>
+[idle_minutes]" line each; every name must also be in pools.conf) every
+--interval seconds, 60 by default, or once with --once. A pool grows to its
+busy runners plus the queued jobs it could take, capped at <max>, when that
+is more containers than it has; it shrinks to <min> once it has had no busy
+runner and no queued job for [idle_minutes] (default 10), and only after the
+same busy check stop makes. A queued job that several pools.conf pools could
+take counts against the one with the fewest labels, so a pool reserved by an
+extra label doesn't grow for jobs the plain pool serves. pools.conf is never
+rewritten. --dry-run prints what it would do and changes nothing.
 EOF
 }
 
@@ -609,6 +622,188 @@ cmd_list_json() {
   printf ']\n'
 }
 
+AUTOSCALE_CONF="autoscale.conf"
+# "<name> <epoch>" for each pool idle above its min, and since when, so the
+# idle timeout survives from one pass to the next.
+AUTOSCALE_STATE=".autoscale-state"
+
+# RUNNER_HOST_LABEL as compose resolves it: the environment, then .env.
+host_label() {
+  local label="${RUNNER_HOST_LABEL:-}"
+  if [[ -z "$label" && -f .env ]]; then
+    label="$(tr -d '\r' < .env | sed -n 's/^RUNNER_HOST_LABEL=//p' | tail -1)"
+    # Compose strips one pair of surrounding quotes; so must this, or the label won't match.
+    if [[ "$label" =~ ^\"(.*)\"$ || "$label" =~ ^\'(.*)\'$ ]]; then label="${BASH_REMATCH[1]}"; fi
+  fi
+  printf '%s\n' "${label:-unlabelled-host}"
+}
+
+# Succeeds if comma-separated label list <have> includes every label in <want>.
+labels_cover() {
+  local want l
+  IFS=, read -ra want <<< "$2"
+  for l in "${want[@]}"; do
+    [[ ",$1," == *",$l,"* ]] || return 1
+  done
+}
+
+# One lowercased, comma-joined runs-on label list per job queued in <repo>.
+# Queued runs aren't enough: a run already in progress can have jobs still
+# waiting for a runner. Fails when GitHub can't be asked.
+queued_jobs() {
+  local repo="$1" status ids id
+  for status in queued in_progress; do
+    ids="$(gh api "repos/$repo/actions/runs?status=$status&per_page=100" --paginate \
+      --jq '.workflow_runs[].id' 2>/dev/null)" || return 1
+    for id in $ids; do
+      gh api "repos/$repo/actions/runs/$id/jobs?filter=latest&per_page=100" --paginate \
+        --jq '.jobs[] | select(.status == "queued") | .labels | map(ascii_downcase) | join(",")' \
+        2>/dev/null || return 1
+    done
+  done
+}
+
+# <name>'s "<name> <epoch>" line from the idle state, or nothing.
+state_line() {
+  [[ -f "$AUTOSCALE_STATE" ]] || return 0
+  awk -v n="$1" '$1 == n' "$AUTOSCALE_STATE"
+}
+
+autoscale_tick() {
+  local dry="$1" now host decl="" repos repo erepo name min max idle extra
+  local jobs runners job best bestn cand crepo clabels demand
+  local line count label mem pids cids cid current busy queued need target reason since state=""
+  now="$(date +%s)"
+  host="$(host_label)"
+
+  # "<name> <repo> <labels>" for every pools.conf pool, autoscaled or not: a
+  # queued job one of them could take is that pool's to serve.
+  while IFS= read -r name; do
+    read -r repo _ extra _ _ <<< "$(conf_line "$name")"
+    [[ "$extra" == - ]] && extra=""
+    decl+="$name $repo $(printf 'self-hosted,linux,x64,docker,%s%s' "$host" "${extra:+,$extra}" | tr '[:upper:]' '[:lower:]')"$'\n'
+  done < <(conf_names)
+
+  # "<name> <min> <max> <idle_minutes> <repo>" per valid autoscale.conf line.
+  local entries=""
+  while read -r name min max idle _ || [[ -n ${name:-} ]]; do
+    [[ -z "$name" || "$name" == \#* ]] && continue
+    idle="${idle:-10}"
+    repo="$(awk -v n="$name" '$1 == n { print $2 }' <<< "$decl")"
+    if [[ -z "$repo" ]]; then
+      echo "$name: not in $POOLS_CONF -- skipped" >&2; continue
+    fi
+    if ! [[ "$min" =~ ^[0-9]+$ && "$max" =~ ^[0-9]+$ && "$idle" =~ ^[0-9]+$ ]] || (( min > max )); then
+      echo "$name: needs <min> <max> [idle_minutes] as integers, min <= max -- skipped" >&2; continue
+    fi
+    entries+="$name $min $max $idle $repo"$'\n'
+  done < <(tr -d '\r' < "$AUTOSCALE_CONF")
+
+  repos="$(awk 'NF { print $5 }' <<< "$entries" | sort -u)"
+  while IFS= read -r repo; do
+    [[ -z "$repo" ]] && continue
+    if ! jobs="$(queued_jobs "$repo" < /dev/null)" || ! runners="$(repo_runners "$repo" < /dev/null)"; then
+      while read -r name _ _ _ erepo; do
+        [[ "$erepo" == "$repo" ]] || continue
+        echo "$name: could not ask GitHub about $repo -- left as it is" >&2
+        # Keep its idle clock: an outage says nothing about whether it's idle.
+        state+="$(state_line "$name")"$'\n'
+      done <<< "$entries"
+      continue
+    fi
+
+    # Each queued job goes to the declared pool for this repo with the
+    # fewest labels that still covers it.
+    demand=""
+    while IFS= read -r job; do
+      [[ -n "$job" ]] || continue
+      best="" bestn=999999
+      while read -r cand crepo clabels; do
+        [[ "$crepo" == "$repo" ]] || continue
+        labels_cover "$clabels" "$job" || continue
+        count="$(tr -cd , <<< "$clabels" | wc -c | tr -d ' ')"
+        if (( count < bestn )); then best="$cand" bestn="$count"; fi
+      done <<< "$decl"
+      if [[ -n "$best" ]]; then demand+="$best"$'\n'; fi
+    done <<< "$jobs"
+
+    while read -r name min max idle erepo; do
+      [[ "$erepo" == "$repo" ]] || continue
+      read -r _ _ label mem pids <<< "$(conf_line "$name")"
+      cids="$(pool_cids "$(project "$name")" < /dev/null)"
+      current=0 busy=0
+      for cid in $cids; do
+        current=$((current + 1))
+        line="$(runner_for "$cid" <<< "$runners")" || continue
+        if [[ "$(cut -d' ' -f3 <<< "$line")" == true ]]; then busy=$((busy + 1)); fi
+      done
+      queued="$(grep -cxF "$name" <<< "$demand" || true)"
+      need=$((busy + queued))
+      target="$current" reason="steady" since="$now"
+      if (( current < min )); then
+        target="$min" reason="below min $min"
+      fi
+      if (( need > max )); then need="$max"; fi
+      if (( need > target )); then
+        target="$need" reason="$queued queued, $busy busy"
+      elif (( queued > 0 && need == max && target == current )); then
+        reason="$queued queued, but at max $max"
+      fi
+      if (( target == current && queued == 0 && busy == 0 && current > min )); then
+        since="$(state_line "$name" | cut -d' ' -f2)"
+        since="${since:-$now}"
+        if (( now - since >= idle * 60 )); then
+          target="$min" reason="idle ${idle}m"
+        else
+          state+="$name $since"$'\n'
+          reason="idle, down to $min in $(( idle * 60 - (now - since) ))s"
+        fi
+      fi
+      echo "$name: $current containers, $busy busy, $queued queued -> $target ($reason)"
+      [[ -z "$dry" && "$target" != "$current" ]] || continue
+      # stdin redirected throughout: these run inside a loop reading a here-string.
+      if (( target < current )) && ! ( require_idle "$name" ) < /dev/null; then
+        echo "$name: not shrinking after all" >&2
+        state+="$name $since"$'\n'
+        continue
+      fi
+      cmd_up "$name" "$repo" "$target" "$label" "$mem" "$pids" < /dev/null \
+        || echo "$name: resize to $target failed" >&2
+    done <<< "$entries"
+  done <<< "$repos"
+
+  if [[ -z "$dry" ]]; then
+    grep -v '^$' <<< "$state" > "$AUTOSCALE_STATE" || true
+  fi
+}
+
+cmd_autoscale() {
+  local usage="usage: ./pools.sh autoscale [--once] [--dry-run] [--interval <seconds>]"
+  local once="" dry="" interval=60
+  while (( $# )); do
+    case "$1" in
+      --once) once=1 ;;
+      --dry-run) dry=1 ;;
+      --interval)
+        [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || die "$usage -- <seconds> must be a positive integer"
+        interval="$2"; shift ;;
+      *) die "$usage" ;;
+    esac
+    shift
+  done
+  [[ -f "$AUTOSCALE_CONF" ]] || die "no $AUTOSCALE_CONF here -- copy autoscale.conf.example and list the pools to autoscale"
+  if [[ -n "$once" ]]; then
+    autoscale_tick "$dry"
+    return
+  fi
+  while :; do
+    echo "== $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    # A subshell, so a pass that dies (docker down, say) doesn't end the loop.
+    ( autoscale_tick "$dry" ) || echo "pools.sh: autoscale pass failed; next in ${interval}s" >&2
+    sleep "$interval"
+  done
+}
+
 case "${1:-}" in
   up)    shift; cmd_up "$@" ;;
   down)  shift; cmd_down "$@" ;;
@@ -620,6 +815,7 @@ case "${1:-}" in
   scale) shift; cmd_scale "$@" ;;
   sync)  shift; cmd_sync "$@" ;;
   declare) shift; cmd_declare "$@" ;;
+  autoscale) shift; cmd_autoscale "$@" ;;
   list)
     case "${2:-}" in
       "")     cmd_list ;;
