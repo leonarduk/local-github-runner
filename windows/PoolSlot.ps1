@@ -308,20 +308,36 @@ function Assert-RunnersIdle {
         [switch]$Force
     )
     if ($Force) { return }
-    if (-not $HasSlots) { return }
+    $why = Get-RunnersNotIdleReason @PSBoundParameters
+    if ($why) { Invoke-PoolRefuse $why }
+}
+
+# Assert-RunnersIdle's check without the exit: why the runners can't be
+# confirmed idle, or $null if they can. For autoscale, which has to carry on
+# to the next pool rather than end the process.
+function Get-RunnersNotIdleReason {
+    param(
+        [Parameter(Mandatory)][string]$Label,
+        [string]$Repo,
+        [string[]]$RunnerNames,
+        [string[]]$BusyAmong,
+        [switch]$HasSlots,
+        [switch]$Force
+    )
+    if (-not $HasSlots) { return $null }
     if (-not $Repo) {
-        Invoke-PoolRefuse "can't tell which repo $Label serves, so can't check it is idle"
+        return "can't tell which repo $Label serves, so can't check it is idle"
     }
     $stats = Get-RunnerMatchStats -Repo $Repo -RunnerNames $RunnerNames
     if (-not $stats.Known) {
-        Invoke-PoolRefuse "could not ask GitHub whether $Label is busy"
+        return "could not ask GitHub whether $Label is busy"
     }
     # A slot between jobs is briefly unregistered, but a running job always
     # has a registration -- so if none of the pool's slots matches a
     # runner, the likelier story is that the name-matching broke, and a
     # broken match would hide a busy runner.
     if ($stats.Matched -eq 0) {
-        Invoke-PoolRefuse "no runner on GitHub matches any of $Label's slots, so can't confirm it is idle"
+        return "no runner on GitHub matches any of $Label's slots, so can't confirm it is idle"
     }
     $busy = $stats.Busy
     if ($PSBoundParameters.ContainsKey('BusyAmong')) {
@@ -331,8 +347,54 @@ function Assert-RunnersIdle {
         }
     }
     if ($busy -gt 0) {
-        Invoke-PoolRefuse "$Label has $busy busy runner(s); this would cancel their jobs"
+        return "$Label has $busy busy runner(s); this would cancel their jobs"
     }
+    return $null
+}
+
+# One lowercased label array per job queued in <Repo> -- from queued runs,
+# and from runs already in progress with jobs still waiting for a runner --
+# or $null if GitHub can't be asked. Mirrors pools.sh's queued_jobs().
+function Get-QueuedJobLabelSets {
+    param([Parameter(Mandatory)][string]$Repo)
+    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { return $null }
+    $sets = New-Object System.Collections.ArrayList
+    foreach ($status in 'queued', 'in_progress') {
+        $page = 1
+        while ($true) {
+            $runsPage = Invoke-GhJson "repos/$Repo/actions/runs?status=$status&per_page=100&page=$page"
+            if ($null -eq $runsPage) { return $null }
+            $runs = @($runsPage.workflow_runs)
+            foreach ($run in $runs) {
+                $jobPage = 1
+                while ($true) {
+                    $jobsPage = Invoke-GhJson "repos/$Repo/actions/runs/$($run.id)/jobs?filter=latest&per_page=100&page=$jobPage"
+                    if ($null -eq $jobsPage) { return $null }
+                    $jobs = @($jobsPage.jobs)
+                    foreach ($job in $jobs) {
+                        if ($job.status -ne 'queued') { continue }
+                        $labels = @($job.labels | ForEach-Object { "$_".ToLowerInvariant() })
+                        if ($labels.Count -gt 0) { [void]$sets.Add($labels) }
+                    }
+                    if ($jobs.Count -lt 100) { break }
+                    $jobPage++
+                }
+            }
+            if ($runs.Count -lt 100) { break }
+            $page++
+        }
+    }
+    # Leading comma: see Get-GhRunnersForRepo -- "no queued jobs" must not
+    # collapse to $null, which means "couldn't ask".
+    return ,$sets.ToArray()
+}
+
+# `gh api <Path>` parsed, or $null if the call or the parse fails.
+function Invoke-GhJson {
+    param([Parameter(Mandatory)][string]$Path)
+    $json = gh api $Path 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $json) { return $null }
+    try { return (($json -join "`n") | ConvertFrom-Json) } catch { return $null }
 }
 
 # Kills <SlotPid> and everything it started. runner-loop.ps1 runs run.cmd,

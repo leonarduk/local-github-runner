@@ -217,6 +217,45 @@ login, same as the Linux side -- see the main README's note on the access
 that needs. Without it, all but `list -Json` refuse, and `list -Json`
 reports `"runners": null`.
 
+### Autoscaling
+
+`.\windows-pools.ps1 autoscale` is the Windows side of `pools.sh autoscale`
+(see the main README, "Autoscaling a host's pools"): it resizes the pools
+listed in `windows-autoscale.conf` to what is actually queued.
+
+```powershell
+Copy-Item windows-autoscale.conf.example windows-autoscale.conf   # gitignored; one "<name> <min> <max> [idle_minutes]" line per pool
+.\windows-pools.ps1 autoscale -Once -DryRun                          # what it would do right now, changing nothing
+.\windows-pools.ps1 autoscale -Interval 120                          # a pass every 120s until stopped
+```
+
+It is its own file, not a column in `autoscale.conf`, for the same reason
+`windows-pools.conf` is: `cicaid-pro` can be a Linux pool and a Windows pool
+on one host, sized separately. Every pass, for each listed pool:
+
+- **Demand** is the jobs queued in its repo whose `runs-on` labels are all
+  among a slot's own -- `self-hosted`, `windows`, `<arch>`, `<HostLabel>`.
+  Slots carry no extra labels, so two Windows pools for one repo can't be
+  told apart: a job counts against the first one `windows-pools.conf`
+  declares. A job asking only for `self-hosted` also fits a Linux pool for
+  the same repo, and both fleets' autoscalers will count it.
+- **Growing**: to busy slots plus queued jobs, capped at `<max>`, and never
+  below `<min>`. It counts running slots, so a slot left stopped is started
+  again rather than counted as capacity.
+- **Shrinking**: to `<min>` once the pool has had no busy slot and no queued
+  job for `[idle_minutes]` (10 by default). It stops the slots numbered above
+  `<min>` exactly as `scale` does, after the same busy check, and a refusal
+  just leaves the pool for the next pass. The idle clock is kept in
+  `.windows-autoscale-state`.
+- A pool whose repo GitHub can't be asked about is left as it is, and
+  `windows-pools.conf` is never rewritten.
+
+Pass the same `-HostLabel` the pool was started with, if it wasn't the
+default `$env:COMPUTERNAME`: it is part of every slot's runner name, and a
+mismatch means no slot is ever seen as busy, so no shrink is ever confirmed.
+Each pass runs in a child process, so one that fails doesn't end the loop.
+To keep it running, register a Scheduled Task that runs it at logon.
+
 `tests\windows_pools_test.ps1` exercises all of the above against a fake
 `gh` and real, harmless, locally-spawned processes standing in for slots --
 no Docker daemon to fake here, and nothing real is touched either. Run it
@@ -244,8 +283,9 @@ One level up from this directory:
 
 | File | Role |
 |---|---|
-| `windows-pools.ps1` | `up` / `down` / `reset` / `list` / `start` / `stop` / `restart` / `restart-runner` / `scale` / `declare`, mirroring `pools.sh` exactly. |
+| `windows-pools.ps1` | `up` / `down` / `reset` / `list` / `start` / `stop` / `restart` / `restart-runner` / `scale` / `declare` / `autoscale`, mirroring `pools.sh` exactly. |
 | `windows-pools.conf` / `.example` | Which repos this host serves natively on Windows, mirroring `pools.conf`. |
+| `windows-autoscale.conf` / `.example` | Which of those pools `autoscale` resizes, and between what bounds, mirroring `autoscale.conf`. |
 | `windows-startRunners.ps1` / `windows-stopRunners.ps1` | Bring the whole fleet in `windows-pools.conf` up or down at once. |
 
 ## Language runtimes (`actions/setup-python` and friends)
