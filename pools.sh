@@ -632,6 +632,8 @@ host_label() {
   local label="${RUNNER_HOST_LABEL:-}"
   if [[ -z "$label" && -f .env ]]; then
     label="$(tr -d '\r' < .env | sed -n 's/^RUNNER_HOST_LABEL=//p' | tail -1)"
+    # Compose strips one pair of surrounding quotes; so must this, or the label won't match.
+    if [[ "$label" =~ ^\"(.*)\"$ || "$label" =~ ^\'(.*)\'$ ]]; then label="${BASH_REMATCH[1]}"; fi
   fi
   printf '%s\n' "${label:-unlabelled-host}"
 }
@@ -651,7 +653,7 @@ labels_cover() {
 queued_jobs() {
   local repo="$1" status ids id
   for status in queued in_progress; do
-    ids="$(gh api "repos/$repo/actions/runs?status=$status&per_page=100" \
+    ids="$(gh api "repos/$repo/actions/runs?status=$status&per_page=100" --paginate \
       --jq '.workflow_runs[].id' 2>/dev/null)" || return 1
     for id in $ids; do
       gh api "repos/$repo/actions/runs/$id/jobs?filter=latest&per_page=100" --paginate \
@@ -737,7 +739,7 @@ autoscale_tick() {
       done
       queued="$(grep -cxF "$name" <<< "$demand" || true)"
       need=$((busy + queued))
-      target="$current" reason="steady"
+      target="$current" reason="steady" since="$now"
       if (( current < min )); then
         target="$min" reason="below min $min"
       fi

@@ -340,7 +340,18 @@ printf 'worm %s\n' "$(( $(date +%s) - 120 ))" > "$a/.autoscale-state"
 check "a busy runner resets the idle clock" 0 "worm: 2 containers, 1 busy" -- env FAKE_BUSY=true bash "$as" autoscale --once
 check "... so it's forgotten" 0 "" -- bash -c "! grep -q worm '$a/.autoscale-state'"
 check "autoscale never rewrites pools.conf" 0 "" -- cmp "$a/pools.conf" "$a/pools.conf.orig"
+
 unset RUNNER_HOST_LABEL
+host_job="self-hosted,box,worm-label"
+printf 'RUNNER_HOST_LABEL=box\n' > "$a/.env"
+check "autoscale reads the host label from .env" 0 "worm: 2 containers, 1 busy, 1 queued" \
+  -- env FAKE_BUSY=true FAKE_JOBS="$host_job" bash "$as" autoscale --once --dry-run
+printf 'RUNNER_HOST_LABEL="box"\n' > "$a/.env"
+check "... with the quotes compose would strip" 0 "worm: 2 containers, 1 busy, 1 queued" \
+  -- env FAKE_BUSY=true FAKE_JOBS="$host_job" bash "$as" autoscale --once --dry-run
+rm -f "$a/.env"
+check "... and none without one" 0 "worm: 2 containers, 1 busy, 0 queued" \
+  -- env FAKE_BUSY=true FAKE_JOBS="$host_job" bash "$as" autoscale --once --dry-run
 
 if (( fails )); then
   echo "$fails check(s) failed"

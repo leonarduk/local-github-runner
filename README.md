@@ -338,9 +338,11 @@ Every pass, for each listed pool:
 
 It resizes with the same `docker compose up --scale` as `scale`, and never
 writes `pools.conf`: that file's count is still what `start` and `restart`
-use, and the next pass corrects it. Each pass reads the runs, their jobs and
-the runners of every autoscaled repo -- a few API calls per repo per
-minute, well inside the 5,000 an hour a token gets.
+use, and the next pass corrects it. Each pass costs, per autoscaled repo, one call
+for its runners, one per page of queued and in-progress runs, and one per
+such run for its jobs -- so a handful a minute for a quiet repo, but a repo
+with 20 runs in flight costs over 20 a minute. A token gets 5,000 an hour;
+raise `--interval` if several busy repos are autoscaled.
 
 Two hosts serving the same repo each see the same queued job, so each may
 add a runner for it; the spare one sits idle and goes again after
