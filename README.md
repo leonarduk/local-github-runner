@@ -347,7 +347,9 @@ raise `--interval` if several busy repos are autoscaled.
 Two hosts serving the same repo each see the same queued job, so each may
 add a runner for it; the spare one sits idle and goes again after
 `[idle_minutes]`. Nothing here sizes memory or CPU yet: a pool still gets
-its `pools.conf` `[mem]`/`[pids]` limits.
+its `pools.conf` `[mem]`/`[pids]` limits. The native Windows fleet has the
+same thing as `windows-pools.ps1 autoscale`; see
+[windows/README.md](windows/README.md#autoscaling).
 
 Keep it running the way you keep anything else on the host running -- a
 systemd unit, or at the least:

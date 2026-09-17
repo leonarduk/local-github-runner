@@ -99,6 +99,13 @@ try {
 function gh {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$GhArgs)
     if ($env:FAKE_GH_FAIL -eq '1') { $global:LASTEXITCODE = 1; return }
+    $global:LASTEXITCODE = 0
+    # autoscale: one queued run (id 100) whenever FAKE_JOBS -- a JSON array
+    # of {status,labels} -- is set, holding those jobs, in every repo.
+    $all = $GhArgs -join ' '
+    if ($all -match 'actions/runs\?status=queued' -and $env:FAKE_JOBS) { Write-Output '{"workflow_runs":[{"id":100}]}'; return }
+    if ($all -match 'actions/runs\?status=') { Write-Output '{"workflow_runs":[]}'; return }
+    if ($all -match '/jobs\?') { Write-Output "{`"jobs`":$($env:FAKE_JOBS)}"; return }
     $runners = '[]'
     if ($env:FAKE_RUNNERS) { $runners = $env:FAKE_RUNNERS }
     $isPage1 = $true
@@ -759,6 +766,84 @@ exit `$LASTEXITCODE
         [void]$spawnedPids.Add((Get-Content $freshPid))
         Write-Host 'ok   start brings a declared pool up'
     } else { Write-Host 'FAIL start brings a declared pool up'; $fails++ }
+
+    # ---- autoscale ----
+    # "as" and "as2" both serve o/as, so a queued job belongs to "as", the
+    # first declared. Stderr substrings stay short: 5.1 wraps them.
+    Add-Content -Path $confPath -Value @('as     o/as   1', 'as2    o/as   1')
+    $asConf = Join-Path $tmp 'windows-autoscale.conf'
+    $asState = Join-Path $tmp '.windows-autoscale-state'
+    $asDir = Join-Path $runnersRoot 'as'
+    $winJobs = '[{"status":"queued","labels":["self-hosted","Windows"]},{"status":"queued","labels":["self-hosted","windows","x64"]}]'
+    $asIdle = '[{"name":"H-C-as-slot1","status":"online","busy":false},{"name":"H-C-as-slot2","status":"online","busy":false},{"name":"H-C-as-slot3","status":"online","busy":false}]'
+
+    Check-Wp 'autoscale refuses without windows-autoscale.conf' 1 'windows-autoscale.conf' @('autoscale', '-Once', '-HostLabel', 'H')
+    Set-Content -Path $asConf -Value @('# name min max idle', 'as 0 3 5', 'as2 0 2', 'ghost 0 1', 'fresh 2 1')
+
+    New-Pool -Name 'as' -Repo 'o/as' -SlotCount 1 -RunningCount 1 | Out-Null
+    New-Slot -PoolDir $asDir -Index 2 | Out-Null
+    New-Slot -PoolDir $asDir -Index 3 | Out-Null
+    $env:FAKE_RUNNERS = '[{"name":"H-C-as-slot1","status":"online","busy":true}]'
+    $env:FAKE_JOBS = $winJobs
+    Check-Wp 'autoscale -DryRun says it would grow to busy + queued' 0 'as: 1 running, 1 busy, 2 queued -> 3' @('autoscale', '-Once', '-DryRun', '-HostLabel', 'H')
+    if (-not (Test-Path (Join-Path $asDir 'slot-2\.pid')) -and -not (Test-Path $asState)) {
+        Write-Host 'ok   autoscale -DryRun starts nothing and writes no state'
+    } else { Write-Host 'FAIL autoscale -DryRun starts nothing and writes no state'; $fails++ }
+    Check-Wp 'a job counts against only the first pool for its repo' 0 'as2: 0 running, 0 busy, 0 queued -> 0' @('autoscale', '-Once', '-DryRun', '-HostLabel', 'H')
+    Check-Wp 'autoscale skips a pool windows-pools.conf does not declare' 0 'ghost:' @('autoscale', '-Once', '-DryRun', '-HostLabel', 'H')
+    Check-Wp 'autoscale skips a line with min > max' 0 'fresh:' @('autoscale', '-Once', '-DryRun', '-HostLabel', 'H')
+    $env:FAKE_JOBS = '[{"status":"queued","labels":["self-hosted","linux"]},{"status":"queued","labels":["windows","otherhost"]},{"status":"in_progress","labels":["self-hosted","windows"]}]'
+    Check-Wp 'a job for linux, another host, or already running counts against nothing' 0 'as: 1 running, 1 busy, 0 queued -> 1 (steady)' @('autoscale', '-Once', '-DryRun', '-HostLabel', 'H')
+    $env:FAKE_JOBS = $winJobs
+    Check-Wp 'autoscale grows a pool' 0 'as: 1 running, 1 busy, 2 queued -> 3' @('autoscale', '-Once', '-HostLabel', 'H')
+    $grownAs = 0
+    foreach ($i in 2, 3) {
+        $p = Join-Path $asDir "slot-$i\.pid"
+        if (Test-Path $p) { [void]$spawnedPids.Add((Get-Content $p)); $grownAs++ }
+    }
+    if ($grownAs -eq 2) { Write-Host 'ok   autoscale starts the new slots' }
+    else { Write-Host "FAIL autoscale starts the new slots: $grownAs of 2 started"; $fails++ }
+    $env:FAKE_JOBS = $null
+
+    # The started slots' runner-loop.ps1 exits at once (empty PAT), so stand
+    # dummy processes in for them before checking what idle does.
+    New-Slot -PoolDir $asDir -Index 2 -Running | Out-Null
+    New-Slot -PoolDir $asDir -Index 3 -Running | Out-Null
+    $env:FAKE_RUNNERS = $asIdle
+    Check-Wp 'an idle pool waits out its idle minutes' 0 'as: 3 running, 0 busy, 0 queued -> 3 (idle, down to 0 in' @('autoscale', '-Once', '-HostLabel', 'H')
+    if ((Test-Path $asState) -and (@(Get-Content $asState) -match '^as \d+$')) {
+        Write-Host 'ok   ... remembered between passes'
+    } else { Write-Host 'FAIL ... remembered between passes'; $fails++ }
+
+    Set-Content -Path $asState -Value "as $([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - 301)"
+    $env:FAKE_RUNNERS = '[]'
+    Check-Wp 'autoscale does not shrink when the busy check cannot confirm idle' 0 'not shrinking' @('autoscale', '-Once', '-HostLabel', 'H')
+    if (@(Get-PoolSlotDirs -PoolDir $asDir).Count -eq 3 -and (@(Get-Content $asState) -match '^as \d+$')) {
+        Write-Host 'ok   ... leaving the slots and the idle clock alone'
+    } else { Write-Host 'FAIL ... leaving the slots and the idle clock alone'; $fails++ }
+    $env:FAKE_GH_FAIL = '1'
+    Check-Wp 'autoscale leaves pools alone when GitHub cannot be asked' 0 'could not ask' @('autoscale', '-Once', '-HostLabel', 'H')
+    $env:FAKE_GH_FAIL = $null
+    if (@(Get-PoolSlotDirs -PoolDir $asDir).Count -eq 3 -and (@(Get-Content $asState) -match '^as \d+$')) {
+        Write-Host 'ok   ... keeping its idle clock'
+    } else { Write-Host 'FAIL ... keeping its idle clock'; $fails++ }
+
+    $env:FAKE_RUNNERS = $asIdle
+    Check-Wp 'autoscale shrinks a pool idle past its idle minutes' 0 'as: 3 running, 0 busy, 0 queued -> 0 (idle 5m)' @('autoscale', '-Once', '-HostLabel', 'H')
+    $env:FAKE_RUNNERS = $null
+    if (@(Get-PoolSlotDirs -PoolDir $asDir).Count -eq 0 -and -not (@(Get-Content $asState) -match '^as ')) {
+        Write-Host 'ok   ... removing its slots and forgetting the idle clock'
+    } else { Write-Host "FAIL ... removing its slots and forgetting the idle clock: $(@(Get-PoolSlotDirs -PoolDir $asDir).Count) slot(s) left"; $fails++ }
+    if ((Get-PoolConfLine -ConfPath $confPath -Name 'as').Count -eq 1) {
+        Write-Host 'ok   autoscale never rewrites windows-pools.conf'
+    } else { Write-Host 'FAIL autoscale never rewrites windows-pools.conf'; $fails++ }
+
+    Set-Content -Path $asConf -Value 'as 1 3 0'
+    New-Slot -PoolDir $asDir -Index 1 | Out-Null
+    Check-Wp 'autoscale raises a pool below min' 0 'as: 0 running, 0 busy, 0 queued -> 1 (below min 1)' @('autoscale', '-Once', '-HostLabel', 'H')
+    $minPid = Join-Path $asDir 'slot-1\.pid'
+    if (Test-Path $minPid) { [void]$spawnedPids.Add((Get-Content $minPid)); Write-Host 'ok   ... starting its slot' }
+    else { Write-Host 'FAIL ... starting its slot'; $fails++ }
 } finally {
     Cleanup
     if ($env:COMPUTERNAME_BACKUP) { $env:COMPUTERNAME = $env:COMPUTERNAME_BACKUP }

@@ -1,0 +1,17 @@
+# The Windows pools `.\windows-pools.ps1 autoscale` resizes. One line per pool:
+#
+#   cp windows-autoscale.conf.example windows-autoscale.conf   # gitignored, edit freely
+#
+# The Windows counterpart of autoscale.conf, and separate from it for the
+# same reason windows-pools.conf is separate from pools.conf: a name like
+# cicaid-pro can be a Linux pool and a Windows pool on the same host.
+#
+# <name> must also be declared in windows-pools.conf, which still supplies
+# the repo; its count there is ignored while it's autoscaled. <min> is kept
+# running even with nothing queued. [idle_minutes] is how long a pool must
+# have no busy runner and no queued job before it drops back to <min>; 10 if
+# omitted.
+#
+# name               min  max  idle_minutes
+jobtrack             0    2
+cicaid-pro           1    2    15
