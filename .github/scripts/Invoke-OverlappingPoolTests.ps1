@@ -155,7 +155,15 @@ if ($failed.Count -gt 0) {
     exit 1
 }
 if (-not $overlapped) {
-    Write-Host ("every run of {0} finished before the next one started, so nothing was tested concurrently -- lower -StaggerSeconds (currently {1}s)" -f $TestPath, $StaggerSeconds)
+    # Two ways to get here, and they call for different things, so say
+    # which: the runs really did not overlap, or none of them would say
+    # when it ended, which is not a pass either.
+    $exact = @($started | Where-Object { $_.EndIsExact })
+    if ($exact.Count -eq 0) {
+        Write-Host ("no run of {0} reported an exit time, so whether any of them overlapped cannot be established -- not treating that as a pass" -f $TestPath)
+    } else {
+        Write-Host ("every run of {0} finished before the next one started, so nothing was tested concurrently -- lower -StaggerSeconds (currently {1}s)" -f $TestPath, $StaggerSeconds)
+    }
     exit 1
 }
 

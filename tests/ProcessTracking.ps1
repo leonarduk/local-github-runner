@@ -74,31 +74,37 @@ function Register-Spawned {
 # Returns the Process, or $null if there is nothing of ours to track.
 function Register-SlotPidFile {
     param([Parameter(Mandatory)][string]$PidFile)
-    # A digits-only read, not just a non-empty one: Set-Content creates a
-    # file before it writes to it, so a .pid read the instant it appears
-    # can come back empty -- which is a parameter-binding failure no
-    # -ErrorAction suppresses, or, once PowerShell coerces it, PID 0: the
-    # System Idle Process, which is always running and never exits.
-    $slotPid = "$(Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)".Trim()
-    if ($slotPid -notmatch '^\d+$') { return $null }
-    $proc = Get-Process -Id ([int]$slotPid) -ErrorAction SilentlyContinue
-    if (-not $proc) { return $null }
-    # The handle first and the start time second, in that order: opening
-    # the handle is what pins the PID, so a process that survives both
-    # checks cannot have been replaced between them. The file's own time is
-    # read last for the same reason: a .pid rewritten under us (a slot
-    # restarting, say) can only make this stricter, and the strict answer
-    # here is to leave a process alone, never to kill one that isn't ours.
-    #
-    # All of it inside one try, so this function cannot throw: every step
-    # reads something that another process is free to take away first --
-    # the process may exit, and the .pid file may be gone by the time
-    # Get-Item looks. There is nothing to clean up in either case, and a
-    # caller tidying up after a failure is the last place an exception
-    # helps anyone.
+    # One try around all of it, so this function cannot throw: every step
+    # reads something another process is free to take away first -- the
+    # file may be deleted, and the process may exit. There is nothing of
+    # ours to clean up in any of those cases, which is the same $null the
+    # checks below return, and a caller tidying up after a failure is the
+    # last place an exception helps anyone.
     try {
+        # The file's timestamp before its contents, in that order. Read the
+        # other way round and a .pid rewritten between the two reads (a slot
+        # restarting, say) hands back a timestamp *later* than the write
+        # that put the PID we are holding there -- and a stranger that took
+        # that PID in between would sit inside the widened window and be
+        # tracked, which is a stranger this run would then kill. This way
+        # round, a rewrite can only leave the timestamp earlier than the one
+        # our PID was written at, and an early timestamp only ever refuses.
+        $written = (Get-Item $PidFile).LastWriteTime
+        # A digits-only read, not just a non-empty one: Set-Content creates
+        # a file before it writes to it, so a .pid read the instant it
+        # appears can come back empty -- which is a parameter-binding
+        # failure no -ErrorAction suppresses, or, once PowerShell coerces
+        # it, PID 0: the System Idle Process, which is always running and
+        # never exits.
+        $slotPid = "$(Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)".Trim()
+        if ($slotPid -notmatch '^\d+$') { return $null }
+        $proc = Get-Process -Id ([int]$slotPid) -ErrorAction SilentlyContinue
+        if (-not $proc) { return $null }
+        # The handle before the start time: opening the handle is what pins
+        # the PID, so a process that survives both checks cannot have been
+        # replaced between them.
         $null = $proc.Handle
-        if ($proc.StartTime -gt (Get-Item $PidFile).LastWriteTime) { return $null }
+        if ($proc.StartTime -gt $written) { return $null }
     } catch { return $null }
     [void]$script:TrackedProcesses.Add($proc)
     return $proc
