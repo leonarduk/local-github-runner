@@ -89,8 +89,17 @@ function Register-SlotPidFile {
     # read last for the same reason: a .pid rewritten under us (a slot
     # restarting, say) can only make this stricter, and the strict answer
     # here is to leave a process alone, never to kill one that isn't ours.
-    try { $null = $proc.Handle } catch { return $null }
-    if ($proc.StartTime -gt (Get-Item $PidFile).LastWriteTime) { return $null }
+    #
+    # All of it inside one try, so this function cannot throw: every step
+    # reads something that another process is free to take away first --
+    # the process may exit, and the .pid file may be gone by the time
+    # Get-Item looks. There is nothing to clean up in either case, and a
+    # caller tidying up after a failure is the last place an exception
+    # helps anyone.
+    try {
+        $null = $proc.Handle
+        if ($proc.StartTime -gt (Get-Item $PidFile).LastWriteTime) { return $null }
+    } catch { return $null }
     [void]$script:TrackedProcesses.Add($proc)
     return $proc
 }

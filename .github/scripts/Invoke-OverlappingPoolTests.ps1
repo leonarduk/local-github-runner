@@ -92,6 +92,10 @@ for ($i = 0; $i -lt $Runs; $i++) {
         })
 }
 
+# One deadline for all of them, set once the last run has been started, not
+# a budget each: six runs of a suite that hangs are still one wait, and the
+# job's own timeout-minutes has to cover the staggering plus this, not
+# $Runs times this.
 $deadline = [DateTime]::Now.AddMinutes($TimeoutMinutes)
 foreach ($run in $started) {
     $left = [int]($deadline - [DateTime]::Now).TotalMilliseconds
