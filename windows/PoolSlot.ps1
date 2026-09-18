@@ -497,8 +497,13 @@ function Stop-Slot {
     # is what let a slot that exited mid-wait hand its number to something
     # else in time to be killed in its place.
     $proc = Get-SlotProcess -SlotDir $SlotDir
-    $slotPid = "$(Get-Content $pidFile -ErrorAction SilentlyContinue | Select-Object -First 1)".Trim()
     if (-not $proc) {
+        # The only place the raw contents are read: there is no process to
+        # name, so what the file says is the only thing to report. Every
+        # line below names $proc.Id instead, which cannot drift from the
+        # process being waited on and killed the way a re-read of the file
+        # can.
+        $slotPid = "$(Get-Content $pidFile -ErrorAction SilentlyContinue | Select-Object -First 1)".Trim()
         # This slot's process is gone either way, and the file is stale,
         # which is what removing it says. But say which of the two it was:
         # "not running" about a number something else is running under
@@ -513,7 +518,7 @@ function Stop-Slot {
         return $true
     }
 
-    Write-Host "Stop-Slot: signalled $SlotLabel (pid $slotPid), waiting up to ${TimeoutSeconds}s"
+    Write-Host "Stop-Slot: signalled $SlotLabel (pid $($proc.Id)), waiting up to ${TimeoutSeconds}s"
     [void]$proc.WaitForExit($TimeoutSeconds * 1000)
 
     if (-not $proc.HasExited) {

@@ -394,6 +394,10 @@ Write-Output 'idle-ok'
 Set-Content -Path '$($childPidFile -replace "'", "''")' -Value `$child.Id
 $dummyCommand
 "@
+    # Both processes in that script wait on *this* test process, not on
+    # each other: the child has to outlive its parent, or Stop-Slot killing
+    # the parent would be indistinguishable from the child following it
+    # down, which is the very thing this check is about.
     $parent = Start-Process -FilePath $shellExe -ArgumentList @('-NoProfile', '-File', $parentScript) -WindowStyle Hidden -PassThru
     [void](Register-Spawned $parent)
     # Waits for the file to hold a PID, not just to exist, and holds the
