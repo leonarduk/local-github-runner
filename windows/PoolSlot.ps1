@@ -167,16 +167,60 @@ function Get-SlotIndex {
     return $null
 }
 
-# Whether a slot's registered background process is alive, per its .pid
-# file.
-function Test-SlotRunning {
+# The process a slot's .pid file names, as a Process object with its handle
+# held open -- or $null when nothing this file can vouch for is running.
+#
+# A PID is not an identity. A slot's process can die at any time (a crash, a
+# reboot that left the file behind, a runner-loop that gave up), the .pid
+# file outlives it, and Windows hands the number to the next process that
+# starts. "Get-Process -Id (Get-Content .pid)" then says the slot is running
+# and points at a stranger -- which Stop-Slot would go on to taskkill /T /F,
+# taking down that process and its children. Whatever else is on the host,
+# it is not ours to kill because a runner died here once.
+#
+# So a PID is only this slot's if the process it names started before the
+# .pid file that names it was written, which a process that merely inherited
+# the number cannot have done. The file's own timestamp is read first: a
+# .pid rewritten under us then leaves the comparison stricter rather than
+# looser, and strict here means leaving a process alone.
+#
+# Holding the handle is what makes the answer keep meaning something. The
+# PID cannot be reused while it is open, so a caller can check the process,
+# wait a minute for it to stop, and still know that the number it kills is
+# the one it checked.
+function Get-SlotProcess {
     param([Parameter(Mandatory)][string]$SlotDir)
     $pidFile = Join-Path $SlotDir '.pid'
-    if (-not (Test-Path $pidFile)) { return $false }
-    $slotPid = Get-Content $pidFile -ErrorAction SilentlyContinue
-    if (-not $slotPid) { return $false }
-    $proc = Get-Process -Id $slotPid -ErrorAction SilentlyContinue
-    return [bool]$proc
+    if (-not (Test-Path $pidFile)) { return $null }
+    try {
+        # -Force: a name beginning with a dot is hidden to Get-Item on
+        # some hosts, and a .pid could carry the hidden attribute here too.
+        $written = (Get-Item -Force $pidFile).LastWriteTime
+        $slotPid = "$(Get-Content $pidFile -ErrorAction SilentlyContinue | Select-Object -First 1)".Trim()
+        # Digits only: Set-Content creates a file before writing to it, so a
+        # .pid read while a slot is starting can come back empty, and an
+        # empty read coerces to PID 0 -- the System Idle Process, which is
+        # always running and never exits.
+        if ($slotPid -notmatch '^\d+$') { return $null }
+        $proc = Get-Process -Id ([int]$slotPid) -ErrorAction SilentlyContinue
+        if (-not $proc) { return $null }
+        # The handle first, so the checks below cannot be answered about one
+        # process and acted on against another. It also fails, and so
+        # refuses, for a process this account may not touch -- a recycled
+        # PID belonging to a service, say.
+        $null = $proc.Handle
+        if ($proc.HasExited) { return $null }
+        if ($proc.StartTime -gt $written) { return $null }
+        return $proc
+    } catch { return $null }
+}
+
+# Whether a slot's registered background process is alive, per its .pid
+# file -- and per the rules in Get-SlotProcess about what that file can and
+# cannot prove.
+function Test-SlotRunning {
+    param([Parameter(Mandatory)][string]$SlotDir)
+    return [bool](Get-SlotProcess -SlotDir $SlotDir)
 }
 
 # The GitHub runner name a slot registers under -- has to match
@@ -446,25 +490,41 @@ function Stop-Slot {
         Write-Host "Stop-Slot: $SlotLabel has no .pid file, nothing to signal"
         return $true
     }
-    $slotPid = Get-Content $pidFile
-    $proc = Get-Process -Id $slotPid -ErrorAction SilentlyContinue
+    # One look-up, held for the rest of this function: the handle it keeps
+    # open is what stops the PID being recycled between the checks here and
+    # the kill below, so every "is it still running" and the taskkill at the
+    # end are all about the same process. Asking Get-Process again each time
+    # is what let a slot that exited mid-wait hand its number to something
+    # else in time to be killed in its place.
+    $proc = Get-SlotProcess -SlotDir $SlotDir
     if (-not $proc) {
-        Write-Host "Stop-Slot: $SlotLabel pid $slotPid is not running"
+        # The only place the raw contents are read: there is no process to
+        # name, so what the file says is the only thing to report. Every
+        # line below names $proc.Id instead, which cannot drift from the
+        # process being waited on and killed the way a re-read of the file
+        # can.
+        $slotPid = "$(Get-Content $pidFile -ErrorAction SilentlyContinue | Select-Object -First 1)".Trim()
+        # This slot's process is gone either way, and the file is stale,
+        # which is what removing it says. But say which of the two it was:
+        # "not running" about a number something else is running under
+        # reads like a bug in the tool to whoever is looking at the log,
+        # and the difference is the whole reason nothing is killed here.
+        $note = 'is not running'
+        if ($slotPid -match '^\d+$' -and (Get-Process -Id ([int]$slotPid) -ErrorAction SilentlyContinue)) {
+            $note = 'is not this slot any more -- another process has that number now, and it is not ours to kill'
+        }
+        Write-Host "Stop-Slot: $SlotLabel pid $slotPid $note"
         Remove-Item -Force $pidFile
         return $true
     }
 
-    Write-Host "Stop-Slot: signalled $SlotLabel (pid $slotPid), waiting up to ${TimeoutSeconds}s"
-    $waited = 0
-    while ((Get-Process -Id $slotPid -ErrorAction SilentlyContinue) -and $waited -lt $TimeoutSeconds) {
-        Start-Sleep -Seconds 2
-        $waited = $waited + 2
-    }
+    Write-Host "Stop-Slot: signalled $SlotLabel (pid $($proc.Id)), waiting up to ${TimeoutSeconds}s"
+    [void]$proc.WaitForExit($TimeoutSeconds * 1000)
 
-    if (Get-Process -Id $slotPid -ErrorAction SilentlyContinue) {
+    if (-not $proc.HasExited) {
         if ($Force) {
             Write-Host "Stop-Slot: $SlotLabel still running after ${TimeoutSeconds}s, forcing (-Force) -- any in-progress job is cut off"
-            Stop-SlotProcessTree -SlotPid $slotPid
+            Stop-SlotProcessTree -SlotPid $proc.Id
         } else {
             Write-Host "Stop-Slot: $SlotLabel still running after ${TimeoutSeconds}s (likely mid-job) -- pass -Force to kill it, or wait longer"
             return $false
@@ -496,12 +556,14 @@ function Start-Slot {
     $logDir = Join-Path $PoolDir 'logs'
     New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
-    if (Test-Path $pidFile) {
-        $existingPid = Get-Content $pidFile -ErrorAction SilentlyContinue
-        if ($existingPid -and (Get-Process -Id $existingPid -ErrorAction SilentlyContinue)) {
-            Write-Host "Start-Slot: $Name slot-$Index already running (pid $existingPid), skipping"
-            return
-        }
+    # Per Get-SlotProcess, not per the bare number in the file: a .pid left
+    # behind by a slot that died, whose number something else now has, must
+    # not be read as "already running" -- that leaves the slot down for as
+    # long as the stranger lives.
+    $existing = Get-SlotProcess -SlotDir $slot
+    if ($existing) {
+        Write-Host "Start-Slot: $Name slot-$Index already running (pid $($existing.Id)), skipping"
+        return
     }
     Remove-Item -Force -ErrorAction SilentlyContinue $stopFile
 

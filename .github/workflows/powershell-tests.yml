@@ -43,3 +43,28 @@ jobs:
         run: |
           ./.github/scripts/Invoke-PowerShellTests.ps1
           exit $LASTEXITCODE
+
+  # The job above runs one suite at a time on a fresh VM, which is the one
+  # condition under which issue #123's bug could not show: a suite that
+  # spawns real processes and tracks them by bare PID only harms (and is
+  # only harmed by) a *concurrent* run of itself. Developers run these two
+  # shells side by side all day; CI never did.
+  overlapping-runs:
+    name: Overlapping runs
+    runs-on: windows-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      # Both shells are exercised from inside the script (it alternates
+      # them run by run), so unlike the job above this is one step, not
+      # one per shell. `exit $LASTEXITCODE` for the same reason as there:
+      # without it the script's `exit 1` is swallowed and the step goes
+      # green over failing tests.
+      - name: Run windows_pools_test.ps1 six times over, staggered
+        shell: pwsh
+        run: |
+          ./.github/scripts/Invoke-OverlappingPoolTests.ps1
+          exit $LASTEXITCODE

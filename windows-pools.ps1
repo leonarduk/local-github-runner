@@ -465,10 +465,7 @@ switch ($Command) {
             $total = ($slots | Measure-Object).Count
             $running = 0
             foreach ($slot in $slots) {
-                $pidFile = Join-Path $slot.FullName '.pid'
-                if ((Test-Path $pidFile) -and (Get-Process -Id (Get-Content $pidFile) -ErrorAction SilentlyContinue)) {
-                    $running++
-                }
+                if (Test-SlotRunning -SlotDir $slot.FullName) { $running++ }
             }
 
             $online = '?'

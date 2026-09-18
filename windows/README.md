@@ -271,6 +271,24 @@ on `windows-latest`, once under Windows PowerShell 5.1 and once under
 PowerShell 7, so a new test there is picked up without editing the
 workflow.
 
+`Stop-Slot` will not kill a process it cannot tie to the slot that named
+it. A `.pid` file outlives the process it names -- a crash, a reboot, a
+runner-loop that gave up -- and Windows hands that number to whatever
+starts next, so "the PID in the file is running" is not the same claim as
+"this slot is running". A slot's process counts as its own only if it
+started before the `.pid` file naming it was written, and the handle is
+held from that check through to the kill, so `stop`, `scale` and
+`autoscale` cannot take down an unrelated process (and, with `taskkill
+/T`, its children) because a runner died on this host once.
+
+Two runs of that suite on one machine used to interfere with each other,
+by way of the PIDs they recorded for the processes they spawned (issue
+#123). The rules that stop them now live in `tests\ProcessTracking.ps1`,
+`tests\process_tracking_test.ps1` checks them, and the same workflow's
+`Overlapping runs` job runs the suite six times at once, 20s apart, under
+both shells -- the shape of an afternoon's work on a real machine, which
+one suite per fresh CI VM never is.
+
 ## The pieces
 
 | File | Role |

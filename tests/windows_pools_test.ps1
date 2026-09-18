@@ -19,13 +19,19 @@
     exercises the real page-loop and JSON parsing in Get-GhRunnersForRepo,
     which an injected closure would bypass.
 
-    Slots are real background processes (a `Start-Sleep` one-liner under
-    powershell/pwsh), not mocked Get-Process calls: PowerShell can't shadow
-    a cmdlet like Get-Process from a script the way bash lets you shadow a
-    binary on PATH, and stubbing it out via module-scoped function
-    overrides would risk masking a real bug in the PID-liveness check
-    itself. A real, short-lived, do-nothing process is simpler and safer
-    than trying to fake process state.
+    Slots are real background processes (a one-liner under powershell/pwsh
+    that waits for this test process to exit), not mocked Get-Process
+    calls: PowerShell can't shadow a cmdlet like Get-Process from a script
+    the way bash lets you shadow a binary on PATH, and stubbing it out via
+    module-scoped function overrides would risk masking a real bug in the
+    PID-liveness check itself. A real, do-nothing process is simpler and
+    safer than trying to fake process state.
+
+    Every process this file spawns is tracked as a Process object with its
+    handle held open, never as a bare PID, through
+    tests\ProcessTracking.ps1 -- whose .NOTES has the whole story (issue
+    #123): killing and liveness-checking by bare PID hit other things that
+    had since taken the number, including a concurrent run's live slots.
 
     Network safety: Install-Runner.ps1 skips its download whenever
     <slot>\config.cmd already exists (see its own header), so every slot
@@ -45,12 +51,16 @@ $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("windows_pools_test_" + [Sys
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 
 $fails = 0
-$spawnedPids = New-Object System.Collections.ArrayList
+
+# Register-Spawned / Register-SlotPidFile / Stop-TrackedProcesses, plus
+# the command every stand-in process runs. See its .NOTES for why none of
+# this works on bare PIDs; tests\process_tracking_test.ps1 checks the
+# rules themselves, which this file, being a single run, cannot.
+. (Join-Path $PSScriptRoot 'ProcessTracking.ps1')
+$dummyCommand = Get-StandInCommand
 
 function Cleanup {
-    foreach ($p in $spawnedPids) {
-        Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
-    }
+    Stop-TrackedProcesses
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $tmp
 }
 
@@ -143,14 +153,14 @@ Export-ModuleMember -Function gh
 
     # ---- helpers -----------------------------------------------------
     function Start-DummyProcess {
-        # A real, harmless, short-lived background process, standing in
-        # for a slot's runner-loop.ps1 without touching anything real.
+        # A real, harmless background process, standing in for a slot's
+        # runner-loop.ps1 without touching anything real. Returns its
+        # Process object.
         $shell = 'powershell'
         if (Get-Command pwsh -ErrorAction SilentlyContinue) { $shell = 'pwsh' }
-        $p = Start-Process -FilePath $shell -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 120') `
+        $p = Start-Process -FilePath $shell -ArgumentList @('-NoProfile', '-Command', $dummyCommand) `
             -WindowStyle Hidden -PassThru
-        [void]$spawnedPids.Add($p.Id)
-        return $p.Id
+        return (Register-Spawned $p)
     }
 
     function New-Slot {
@@ -159,8 +169,8 @@ Export-ModuleMember -Function gh
         New-Item -ItemType Directory -Force -Path $slot | Out-Null
         Set-Content -Path (Join-Path $slot 'config.cmd') -Value 'rem placeholder, prevents a real download'
         if ($Running) {
-            $slotPid = Start-DummyProcess
-            Set-Content -Path (Join-Path $slot '.pid') -Value $slotPid
+            $slotProc = Start-DummyProcess
+            Set-Content -Path (Join-Path $slot '.pid') -Value $slotProc.Id
         }
         return $slot
     }
@@ -174,6 +184,21 @@ Export-ModuleMember -Function gh
             New-Slot -PoolDir $poolDir -Index $i -Running:($i -le $RunningCount) | Out-Null
         }
         return $poolDir
+    }
+
+    # Whether a child's output contains an expected phrase, with every run
+    # of whitespace in both collapsed to one space. Both shells word-wrap a
+    # child's stderr at the host's width, and that width depends on how the
+    # suite itself was launched -- a console, a pipe, or a file all differ,
+    # so `powershell -File <this> > out.txt` wrapped "can't confirm it is
+    # idle" mid-phrase and failed three checks that pass when run straight.
+    # An expected phrase is a phrase, not a line: it should not have to
+    # survive a line break, nor be kept short enough to dodge one.
+    function Test-OutputContains {
+        param([string]$Text, [string]$Want)
+        $flatText = ($Text -replace '\s+', ' ')
+        $flatWant = ($Want -replace '\s+', ' ')
+        return ($flatText -like "*$flatWant*")
     }
 
     function Check {
@@ -192,7 +217,7 @@ Export-ModuleMember -Function gh
         $out = & $Action 2>&1 | Out-String
         $status = $LASTEXITCODE
         if ($null -eq $status) { $status = 0 }
-        if ($status -eq $WantStatus -and $out -like "*$WantOut*") {
+        if ($status -eq $WantStatus -and (Test-OutputContains -Text $out -Want $WantOut)) {
             Write-Host "ok   $Desc"
         } else {
             Write-Host "FAIL ${Desc}: exit $status (want $WantStatus), output: $out"
@@ -316,25 +341,45 @@ Write-Output 'idle-ok'
         Write-Host 'ok   Stop-Slot with a dead pid cleans up the .pid file'
     } else { Write-Host 'FAIL Stop-Slot with a dead pid cleans up the .pid file'; $fails++ }
 
+    # A .pid file whose number has been handed to something else: the slot
+    # died, Windows recycled its PID, and what holds it now is nobody's
+    # business of ours. Stop-Slot used to Get-Process the bare number, find
+    # a process, and taskkill /T /F it -- the stranger and its children.
+    # The stand-in here is a process that started after the .pid file
+    # naming it was written, which is the one thing a process that
+    # inherited the number always is.
+    $strangerSlot = Join-Path $poolForStopSlot 'slot-stranger'
+    New-Item -ItemType Directory -Force -Path $strangerSlot | Out-Null
+    $strangerProc = Start-DummyProcess
+    $strangerPidFile = Join-Path $strangerSlot '.pid'
+    Set-Content -Path $strangerPidFile -Value $strangerProc.Id
+    (Get-Item $strangerPidFile).LastWriteTime = $strangerProc.StartTime.AddSeconds(-5)
+    if (-not (Test-SlotRunning -SlotDir $strangerSlot)) {
+        Write-Host 'ok   Test-SlotRunning says no when the .pid names a process that started after it'
+    } else { Write-Host 'FAIL Test-SlotRunning says no when the .pid names a process that started after it'; $fails++ }
+    $strangerStopped = Stop-Slot -SlotDir $strangerSlot -SlotLabel 'stopslot slot-stranger' -Force -TimeoutSeconds 1
+    # Deliberately a whole second of grace: the point is that nothing was
+    # even asked to die, so any kill would already have landed.
+    Start-Sleep -Seconds 1
+    if ($strangerStopped -and -not (Test-Path $strangerPidFile) -and -not $strangerProc.HasExited) {
+        Write-Host 'ok   Stop-Slot -Force leaves a process that is not this slot''s alive, and drops the stale .pid'
+    } else { Write-Host "FAIL Stop-Slot -Force leaves a process that is not this slot's alive, and drops the stale .pid: stopped=$strangerStopped, pid file=$(Test-Path $strangerPidFile), exited=$($strangerProc.HasExited)"; $fails++ }
+
     $runningSlot = Join-Path $poolForStopSlot 'slot-3'
     New-Item -ItemType Directory -Force -Path $runningSlot | Out-Null
-    $runningPid = Start-DummyProcess
-    Set-Content -Path (Join-Path $runningSlot '.pid') -Value $runningPid
+    $runningProc = Start-DummyProcess
+    Set-Content -Path (Join-Path $runningSlot '.pid') -Value $runningProc.Id
     if (-not (Stop-Slot -SlotDir $runningSlot -SlotLabel 'stopslot slot-3' -TimeoutSeconds 1)) {
         Write-Host 'ok   Stop-Slot without -Force leaves a running process running'
     } else { Write-Host 'FAIL Stop-Slot without -Force leaves a running process running'; $fails++ }
     if (Stop-Slot -SlotDir $runningSlot -SlotLabel 'stopslot slot-3' -Force -TimeoutSeconds 1) {
         Write-Host 'ok   Stop-Slot -Force kills a still-running process'
     } else { Write-Host 'FAIL Stop-Slot -Force kills a still-running process'; $fails++ }
-    # Stop-Process -Force asks the OS to terminate the process but doesn't
-    # guarantee the handle is gone the instant it returns -- give it a
-    # moment before concluding it's still alive.
-    $stillAlive = $true
-    for ($i = 0; $i -lt 20 -and $stillAlive; $i++) {
-        Start-Sleep -Milliseconds 100
-        $stillAlive = [bool](Get-Process -Id $runningPid -ErrorAction SilentlyContinue)
-    }
-    if (-not $stillAlive) {
+    # A kill doesn't guarantee the process is gone the instant it returns --
+    # give it a moment before concluding it's still alive. Asked of the
+    # held handle, not Get-Process -Id: that PID may already be someone
+    # else's.
+    if ($runningProc.WaitForExit(10000)) {
         Write-Host 'ok   Stop-Slot -Force actually terminated the process'
     } else { Write-Host 'FAIL Stop-Slot -Force actually terminated the process'; $fails++ }
 
@@ -345,16 +390,25 @@ Write-Output 'idle-ok'
     $childPidFile = Join-Path $tmp 'child.pid'
     $parentScript = Join-Path $tmp 'parent.ps1'
     Set-Content -Path $parentScript -Value @"
-`$child = Start-Process -FilePath '$shellExe' -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 120') -WindowStyle Hidden -PassThru
+`$child = Start-Process -FilePath '$shellExe' -ArgumentList @('-NoProfile', '-Command', '$dummyCommand') -WindowStyle Hidden -PassThru
 Set-Content -Path '$($childPidFile -replace "'", "''")' -Value `$child.Id
-Start-Sleep -Seconds 120
+$dummyCommand
 "@
+    # Both processes in that script wait on *this* test process, not on
+    # each other: the child has to outlive its parent, or Stop-Slot killing
+    # the parent would be indistinguishable from the child following it
+    # down, which is the very thing this check is about.
     $parent = Start-Process -FilePath $shellExe -ArgumentList @('-NoProfile', '-File', $parentScript) -WindowStyle Hidden -PassThru
-    [void]$spawnedPids.Add($parent.Id)
-    for ($i = 0; $i -lt 100 -and -not (Test-Path $childPidFile); $i++) { Start-Sleep -Milliseconds 100 }
-    if (Test-Path $childPidFile) {
-        $childPid = [int](Get-Content $childPidFile)
-        [void]$spawnedPids.Add($childPid)
+    [void](Register-Spawned $parent)
+    # Waits for the file to hold a PID, not just to exist, and holds the
+    # child's handle open from here on -- same reasons as any slot's .pid
+    # file, so the same function does it.
+    $childProc = $null
+    for ($i = 0; $i -lt 100 -and -not $childProc; $i++) {
+        Start-Sleep -Milliseconds 100
+        $childProc = Register-SlotPidFile $childPidFile
+    }
+    if ($childProc) {
         $treeSlot = Join-Path $poolForStopSlot 'slot-4'
         New-Item -ItemType Directory -Force -Path $treeSlot | Out-Null
         Set-Content -Path (Join-Path $treeSlot '.pid') -Value $parent.Id
@@ -364,12 +418,7 @@ Start-Sleep -Seconds 120
         [void](Stop-Slot -SlotDir $treeSlot -SlotLabel 'stopslot slot-4' -Force -TimeoutSeconds 1)
         $afterStopSlot = $LASTEXITCODE
         $global:LASTEXITCODE = 0
-        $childAlive = $true
-        for ($i = 0; $i -lt 30 -and $childAlive; $i++) {
-            Start-Sleep -Milliseconds 100
-            $childAlive = [bool](Get-Process -Id $childPid -ErrorAction SilentlyContinue)
-        }
-        if (-not $childAlive) {
+        if ($childProc.WaitForExit(10000)) {
             Write-Host 'ok   Stop-Slot -Force kills the slot process''s children too'
         } else { Write-Host 'FAIL Stop-Slot -Force kills the slot process''s children too'; $fails++ }
         if ($afterStopSlot -ne 7) {
@@ -431,7 +480,7 @@ exit `$LASTEXITCODE
         $ErrorActionPreference = 'Continue'
         $out = & $shellExe -NoProfile -File $wpWrapper @WpArgs 2>&1 | Out-String
         $status = $LASTEXITCODE
-        if ($status -eq $WantStatus -and $out -like "*$WantOut*") { Write-Host "ok   $Desc" }
+        if ($status -eq $WantStatus -and (Test-OutputContains -Text $out -Want $WantOut)) { Write-Host "ok   $Desc" }
         else { Write-Host "FAIL ${Desc}: exit $status (want $WantStatus), output: $out"; $script:fails = $script:fails + 1 }
     }
 
@@ -473,7 +522,7 @@ exit `$LASTEXITCODE
     } else { Write-Host "FAIL start writes the toolcache into the slot's runner .env: $($envGot -join ' | ')"; $fails++ }
     $idlePidFile = Join-Path $runnersRoot 'idle\slot-1\.pid'
     if (Test-Path $idlePidFile) {
-        [void]$spawnedPids.Add((Get-Content $idlePidFile))
+        [void](Register-SlotPidFile $idlePidFile)
         Write-Host 'ok   start launched slot-1 and recorded its pid'
     } else { Write-Host 'FAIL start launched slot-1 and recorded its pid'; $fails++ }
     $idleRepoFile = Join-Path $runnersRoot 'idle\.repo'
@@ -552,7 +601,7 @@ exit `$LASTEXITCODE
     Start-Sleep -Milliseconds 500
     $newPidFile = Join-Path $runnersRoot 'worm\slot-2\.pid'
     if (Test-Path $newPidFile) {
-        [void]$spawnedPids.Add((Get-Content $newPidFile))
+        [void](Register-SlotPidFile $newPidFile)
         Write-Host 'ok   restart-runner actually re-launched the slot'
     } else { Write-Host 'FAIL restart-runner actually re-launched the slot'; $fails++ }
 
@@ -661,8 +710,9 @@ exit `$LASTEXITCODE
     $scDir = Join-Path $runnersRoot 'sc'
 
     Check-Wp 'scale refuses an undeclared pool' 1 "no pool named 'stray'" @('scale', 'stray', '2', '-HostLabel', 'H')
-    # Just "non-negative": Windows PowerShell 5.1 wraps a child's stderr at
-    # the console width, which can split the message mid-phrase.
+    # Just "non-negative", rather than the whole sentence: short enough to
+    # read as one assertion. Where it sits relative to a line break no
+    # longer matters -- Test-OutputContains flattens both sides.
     Check-Wp 'scale rejects a non-numeric count' 1 'non-negative' @('scale', 'sc', 'abc', '-HostLabel', 'H')
     Check-Wp 'scale rejects a missing count' 1 'usage' @('scale', 'sc', '-HostLabel', 'H')
 
@@ -704,7 +754,7 @@ exit `$LASTEXITCODE
     $grown = 0
     foreach ($i in 2, 3) {
         $grownPid = Join-Path $scDir "slot-$i\.pid"
-        if (Test-Path $grownPid) { [void]$spawnedPids.Add((Get-Content $grownPid)); $grown++ }
+        if (Test-Path $grownPid) { [void](Register-SlotPidFile $grownPid); $grown++ }
     }
     if ($grown -eq 2) { Write-Host 'ok   scale up starts the new slots' }
     else { Write-Host "FAIL scale up starts the new slots: $grown of 2 started"; $fails++ }
@@ -734,13 +784,11 @@ exit `$LASTEXITCODE
     $env:FAKE_GH_FAIL = $null
     $zeroGrownPid = Join-Path $scDir 'slot-1\.pid'
     if (Test-Path $zeroGrownPid) {
-        [void]$spawnedPids.Add((Get-Content $zeroGrownPid))
+        [void](Register-SlotPidFile $zeroGrownPid)
         Write-Host 'ok   scale up from 0 starts the slot'
     } else { Write-Host 'FAIL scale up from 0 starts the slot'; $fails++ }
 
     # ---- declare ----
-    # Short expected substrings: Windows PowerShell 5.1 wraps a child's
-    # stderr at the console width.
     $confBeforeDeclare = Get-Content -Raw $confPath
     Check-Wp 'declare refuses a pool that is already declared' 1 'already declared' @('declare', 'worm', 'o/other', '-HostLabel', 'H')
     Check-Wp 'declare refuses a bad name' 1 'lowercase' @('declare', 'Bad', 'o/bad', '-HostLabel', 'H')
@@ -763,13 +811,13 @@ exit `$LASTEXITCODE
     Check-Wp 'a declared pool can be started' 0 '' @('start', 'fresh', '-HostLabel', 'H')
     $freshPid = Join-Path $runnersRoot 'fresh\slot-1\.pid'
     if (Test-Path $freshPid) {
-        [void]$spawnedPids.Add((Get-Content $freshPid))
+        [void](Register-SlotPidFile $freshPid)
         Write-Host 'ok   start brings a declared pool up'
     } else { Write-Host 'FAIL start brings a declared pool up'; $fails++ }
 
     # ---- autoscale ----
     # "as" and "as2" both serve o/as, so a queued job belongs to "as", the
-    # first declared. Stderr substrings stay short: 5.1 wraps them.
+    # first declared.
     Add-Content -Path $confPath -Value @('as     o/as   1', 'as2    o/as   1')
     $asConf = Join-Path $tmp 'windows-autoscale.conf'
     $asState = Join-Path $tmp '.windows-autoscale-state'
@@ -799,7 +847,7 @@ exit `$LASTEXITCODE
     $grownAs = 0
     foreach ($i in 2, 3) {
         $p = Join-Path $asDir "slot-$i\.pid"
-        if (Test-Path $p) { [void]$spawnedPids.Add((Get-Content $p)); $grownAs++ }
+        if (Test-Path $p) { [void](Register-SlotPidFile $p); $grownAs++ }
     }
     if ($grownAs -eq 2) { Write-Host 'ok   autoscale starts the new slots' }
     else { Write-Host "FAIL autoscale starts the new slots: $grownAs of 2 started"; $fails++ }
@@ -845,7 +893,7 @@ exit `$LASTEXITCODE
     New-Slot -PoolDir $asDir -Index 1 | Out-Null
     Check-Wp 'autoscale raises a pool below min' 0 'as: 0 running, 0 busy, 0 queued -> 1 (below min 1)' @('autoscale', '-Once', '-HostLabel', 'H')
     $minPid = Join-Path $asDir 'slot-1\.pid'
-    if (Test-Path $minPid) { [void]$spawnedPids.Add((Get-Content $minPid)); Write-Host 'ok   ... starting its slot' }
+    if (Test-Path $minPid) { [void](Register-SlotPidFile $minPid); Write-Host 'ok   ... starting its slot' }
     else { Write-Host 'FAIL ... starting its slot'; $fails++ }
 } finally {
     Cleanup
