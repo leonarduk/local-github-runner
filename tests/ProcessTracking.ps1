@@ -89,7 +89,9 @@ function Register-SlotPidFile {
         # tracked, which is a stranger this run would then kill. This way
         # round, a rewrite can only leave the timestamp earlier than the one
         # our PID was written at, and an early timestamp only ever refuses.
-        $written = (Get-Item $PidFile).LastWriteTime
+        # -Force: a name beginning with a dot is hidden to Get-Item on
+        # some hosts, and a .pid could carry the hidden attribute here too.
+        $written = (Get-Item -Force $PidFile).LastWriteTime
         # A digits-only read, not just a non-empty one: Set-Content creates
         # a file before it writes to it, so a .pid read the instant it
         # appears can come back empty -- which is a parameter-binding

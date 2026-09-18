@@ -341,6 +341,30 @@ Write-Output 'idle-ok'
         Write-Host 'ok   Stop-Slot with a dead pid cleans up the .pid file'
     } else { Write-Host 'FAIL Stop-Slot with a dead pid cleans up the .pid file'; $fails++ }
 
+    # A .pid file whose number has been handed to something else: the slot
+    # died, Windows recycled its PID, and what holds it now is nobody's
+    # business of ours. Stop-Slot used to Get-Process the bare number, find
+    # a process, and taskkill /T /F it -- the stranger and its children.
+    # The stand-in here is a process that started after the .pid file
+    # naming it was written, which is the one thing a process that
+    # inherited the number always is.
+    $strangerSlot = Join-Path $poolForStopSlot 'slot-stranger'
+    New-Item -ItemType Directory -Force -Path $strangerSlot | Out-Null
+    $strangerProc = Start-DummyProcess
+    $strangerPidFile = Join-Path $strangerSlot '.pid'
+    Set-Content -Path $strangerPidFile -Value $strangerProc.Id
+    (Get-Item $strangerPidFile).LastWriteTime = $strangerProc.StartTime.AddSeconds(-5)
+    if (-not (Test-SlotRunning -SlotDir $strangerSlot)) {
+        Write-Host 'ok   Test-SlotRunning says no when the .pid names a process that started after it'
+    } else { Write-Host 'FAIL Test-SlotRunning says no when the .pid names a process that started after it'; $fails++ }
+    $strangerStopped = Stop-Slot -SlotDir $strangerSlot -SlotLabel 'stopslot slot-stranger' -Force -TimeoutSeconds 1
+    # Deliberately a whole second of grace: the point is that nothing was
+    # even asked to die, so any kill would already have landed.
+    Start-Sleep -Seconds 1
+    if ($strangerStopped -and -not (Test-Path $strangerPidFile) -and -not $strangerProc.HasExited) {
+        Write-Host 'ok   Stop-Slot -Force leaves a process that is not this slot''s alive, and drops the stale .pid'
+    } else { Write-Host "FAIL Stop-Slot -Force leaves a process that is not this slot's alive, and drops the stale .pid: stopped=$strangerStopped, pid file=$(Test-Path $strangerPidFile), exited=$($strangerProc.HasExited)"; $fails++ }
+
     $runningSlot = Join-Path $poolForStopSlot 'slot-3'
     New-Item -ItemType Directory -Force -Path $runningSlot | Out-Null
     $runningProc = Start-DummyProcess
