@@ -101,7 +101,12 @@ foreach ($run in $started) {
         try { $run.Proc.Kill() } catch { }
         $run.Code = 'timed out'
     }
+    # When the run ended, not when this loop got round to noticing: the
+    # runs are waited on in the order they started, so "now" here is the
+    # moment the *previous* run's wait returned, which would make every
+    # pair of runs look like it overlapped.
     $run.End = [DateTime]::Now
+    try { if ($run.Proc.HasExited -and $run.Proc.ExitTime -gt $run.Start) { $run.End = $run.Proc.ExitTime } } catch { }
 }
 
 # Did they actually overlap? Two runs overlap when one started before the

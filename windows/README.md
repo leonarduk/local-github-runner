@@ -271,6 +271,14 @@ on `windows-latest`, once under Windows PowerShell 5.1 and once under
 PowerShell 7, so a new test there is picked up without editing the
 workflow.
 
+Two runs of that suite on one machine used to interfere with each other,
+by way of the PIDs they recorded for the processes they spawned (issue
+#123). The rules that stop them now live in `tests\ProcessTracking.ps1`,
+`tests\process_tracking_test.ps1` checks them, and the same workflow's
+`Overlapping runs` job runs the suite six times at once, 20s apart, under
+both shells -- the shape of an afternoon's work on a real machine, which
+one suite per fresh CI VM never is.
+
 ## The pieces
 
 | File | Role |
