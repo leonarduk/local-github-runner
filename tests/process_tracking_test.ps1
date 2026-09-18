@@ -96,9 +96,12 @@ try {
 
     # A .pid file whose process has since exited -- what every slot's .pid
     # file looks like by the end of a run. Written while that process was
-    # still alive, so this is refused whether or not the machine has
-    # already handed the number on: either nothing is running under it, or
-    # what is started after the file was written.
+    # still alive, so this is refused however far the corpse has got: this
+    # run still holds a handle to it, which keeps the PID taken and can
+    # keep Get-Process handing the process back, so being refused rests on
+    # the exit itself and not on the PID having gone away. And if the
+    # number has been handed on, whatever holds it now started after the
+    # file was written, which is refused too.
     $gonePidFile = Join-Path $tmp 'gone.pid'
     $gone = Start-StandIn
     Set-Content -Path $gonePidFile -Value $gone.Id

@@ -104,6 +104,12 @@ function Register-SlotPidFile {
         # the PID, so a process that survives both checks cannot have been
         # replaced between them.
         $null = $proc.Handle
+        # A process that has already exited is not worth tracking -- there
+        # is nothing left to kill. Worth saying out loud, because "exited"
+        # and "gone" are not the same thing on Windows: while anyone holds
+        # a handle, the PID stays taken and Get-Process can still hand back
+        # the corpse, which is the whole reason the handles above work.
+        if ($proc.HasExited) { return $null }
         if ($proc.StartTime -gt $written) { return $null }
     } catch { return $null }
     [void]$script:TrackedProcesses.Add($proc)
