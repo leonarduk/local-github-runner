@@ -39,9 +39,12 @@
     number cannot have done.
 #>
 
-# Populated by Register-Spawned / Register-SlotPidFile, drained by
-# Stop-TrackedProcesses. Dot-sourcing puts it in the caller's script scope,
-# which is where the functions below resolve it from.
+# Added to by Register-Spawned and Register-SlotPidFile. Stop-TrackedProcesses
+# walks it and never empties it: a process it killed still belongs to this
+# run, and a run that cleans up twice (a failure on the way out of one that
+# already tidied up) must find the same list, not a shorter one. Dot-sourcing
+# puts it in the caller's script scope, which is where the functions below
+# resolve it from.
 $script:TrackedProcesses = New-Object System.Collections.ArrayList
 
 # What a stand-in process should run: wait for the process that started it
@@ -82,7 +85,10 @@ function Register-SlotPidFile {
     if (-not $proc) { return $null }
     # The handle first and the start time second, in that order: opening
     # the handle is what pins the PID, so a process that survives both
-    # checks cannot have been replaced between them.
+    # checks cannot have been replaced between them. The file's own time is
+    # read last for the same reason: a .pid rewritten under us (a slot
+    # restarting, say) can only make this stricter, and the strict answer
+    # here is to leave a process alone, never to kill one that isn't ours.
     try { $null = $proc.Handle } catch { return $null }
     if ($proc.StartTime -gt (Get-Item $PidFile).LastWriteTime) { return $null }
     [void]$script:TrackedProcesses.Add($proc)

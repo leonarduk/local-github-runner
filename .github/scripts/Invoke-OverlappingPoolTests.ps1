@@ -85,6 +85,9 @@ for ($i = 0; $i -lt $Runs; $i++) {
             ErrLog  = $errLog
             Start   = [DateTime]::Now
             End     = [DateTime]::MinValue
+            # Whether End is the process's own exit time rather than the
+            # moment this script got round to looking.
+            EndIsExact = $false
             Code    = $null
         })
 }
@@ -106,15 +109,22 @@ foreach ($run in $started) {
     # moment the *previous* run's wait returned, which would make every
     # pair of runs look like it overlapped.
     $run.End = [DateTime]::Now
-    try { if ($run.Proc.HasExited -and $run.Proc.ExitTime -gt $run.Start) { $run.End = $run.Proc.ExitTime } } catch { }
+    try {
+        if ($run.Proc.HasExited -and $run.Proc.ExitTime -gt $run.Start) {
+            $run.End = $run.Proc.ExitTime
+            $run.EndIsExact = $true
+        }
+    } catch { }
 }
 
 # Did they actually overlap? Two runs overlap when one started before the
-# other ended.
+# other ended -- and only a run whose exact end time we have can show that.
+# "Now" is an upper bound, always later than the run really ended, so a pair
+# judged on it would claim an overlap this job never saw.
 $overlapped = $false
 foreach ($a in $started) {
     foreach ($b in $started) {
-        if ($a.Index -lt $b.Index -and $b.Start -lt $a.End) { $overlapped = $true }
+        if ($a.EndIsExact -and $a.Index -lt $b.Index -and $b.Start -lt $a.End) { $overlapped = $true }
     }
 }
 
