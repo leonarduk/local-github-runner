@@ -815,16 +815,19 @@ exit `$LASTEXITCODE
         Write-Host 'ok   ... remembered between passes'
     } else { Write-Host 'FAIL ... remembered between passes'; $fails++ }
 
-    Set-Content -Path $asState -Value "as $([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - 301)"
+    # The exact line, not just its shape: a refused shrink or an outage that
+    # reset the clock to now would still match '^as \d+$'.
+    $idleSince = "as $([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - 301)"
+    Set-Content -Path $asState -Value $idleSince
     $env:FAKE_RUNNERS = '[]'
     Check-Wp 'autoscale does not shrink when the busy check cannot confirm idle' 0 'not shrinking' @('autoscale', '-Once', '-HostLabel', 'H')
-    if (@(Get-PoolSlotDirs -PoolDir $asDir).Count -eq 3 -and (@(Get-Content $asState) -match '^as \d+$')) {
+    if (@(Get-PoolSlotDirs -PoolDir $asDir).Count -eq 3 -and (@(Get-Content $asState) -contains $idleSince)) {
         Write-Host 'ok   ... leaving the slots and the idle clock alone'
     } else { Write-Host 'FAIL ... leaving the slots and the idle clock alone'; $fails++ }
     $env:FAKE_GH_FAIL = '1'
     Check-Wp 'autoscale leaves pools alone when GitHub cannot be asked' 0 'could not ask' @('autoscale', '-Once', '-HostLabel', 'H')
     $env:FAKE_GH_FAIL = $null
-    if (@(Get-PoolSlotDirs -PoolDir $asDir).Count -eq 3 -and (@(Get-Content $asState) -match '^as \d+$')) {
+    if (@(Get-PoolSlotDirs -PoolDir $asDir).Count -eq 3 -and (@(Get-Content $asState) -contains $idleSince)) {
         Write-Host 'ok   ... keeping its idle clock'
     } else { Write-Host 'FAIL ... keeping its idle clock'; $fails++ }
 

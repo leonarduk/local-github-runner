@@ -254,6 +254,11 @@ Pass the same `-HostLabel` the pool was started with, if it wasn't the
 default `$env:COMPUTERNAME`: it is part of every slot's runner name, and a
 mismatch means no slot is ever seen as busy, so no shrink is ever confirmed.
 Each pass runs in a child process, so one that fails doesn't end the loop.
+It costs the same GitHub API calls as the Linux side -- one per in-flight
+run per repo, plus runners -- so raise `-Interval` if several busy repos are
+autoscaled. A pool whose repo can't be asked about is logged as "could not
+ask GitHub" whatever the cause; `gh api repos/<owner>/<repo>/actions/runs`
+by hand shows the real error.
 To keep it running, register a Scheduled Task that runs it at logon.
 
 `tests\windows_pools_test.ps1` exercises all of the above against a fake
