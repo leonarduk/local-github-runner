@@ -28,6 +28,11 @@ API_URL="${GITHUB_API_URL:-https://api.github.com}"
 # duplicate name unless --replace is passed, and silently replacing another
 # live runner is a worse failure than refusing to start.
 #
+# Distinct per container, note, and not per registration: $$ is 1 in every
+# container (this script is PID 1) and $(hostname) is Config.Hostname, which
+# survives a restart. The same container therefore re-registers under the
+# same name, which is why reclaim_orphaned_name() below exists. #153.
+#
 # RUNNER_HOST_LABEL, when set, prefixes the name so that the runner list on
 # GitHub says which physical machine a runner is on. Container hostnames are
 # random hex, which is no help at all once runners live on more than one box.
@@ -45,6 +50,23 @@ api() {
         -H "Accept: application/vnd.github+json" \
         -H "X-GitHub-Api-Version: 2022-11-28" \
         "${API_URL}/repos/${GITHUB_REPOSITORY}/actions/runners/$1"
+}
+
+# The GET and DELETE that reclaim_orphaned_name() needs. Kept separate from
+# api() rather than giving that one a method parameter: every existing caller
+# of api() is a POST that mints a token, and a helper whose verb comes from an
+# argument is one typo away from POSTing to a delete endpoint.
+api_method() {
+    # $1 = HTTP method, $2 = appended to .../actions/runners verbatim, so the
+    # caller writes its own leading "/" or "?". Not assembled here: a helper
+    # that inserts the "/" itself turns a query string into ".../runners/?..",
+    # which GitHub 404s -- and the failure is silent, because the caller below
+    # treats an unreadable listing as "nothing to reclaim".
+    curl -fsS --retry 3 --retry-delay 3 -X "$1" \
+        -H "Authorization: Bearer ${GITHUB_PAT}" \
+        -H "Accept: application/vnd.github+json" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        "${API_URL}/repos/${GITHUB_REPOSITORY}/actions/runners$2"
 }
 
 # --- mint a registration token ------------------------------------------
@@ -103,8 +125,14 @@ trap forward_signal INT TERM
 # behind. `restart: always` then restarts *that same container*, and config.sh
 # refuses with "Cannot configure the runner because it is already configured",
 # so it crash-loops instead of rejoining the pool. Clear the leftovers and
-# register afresh; the name is regenerated per process, so this comes back as
-# a new runner rather than fighting the old registration.
+# register afresh.
+#
+# This does NOT come back as a new runner. RUNNER_NAME is the same string it
+# was: $$ is 1 in every container (entrypoint.sh is PID 1 -- exec-form
+# ENTRYPOINT, no init), and $(hostname) is the container's Config.Hostname,
+# which a restart preserves. Reclaiming the name we left on GitHub is
+# reclaim_orphaned_name()'s job, below; clearing .runner here only settles the
+# local half.
 if [[ -f .runner ]]; then
     log "found a stale runner configuration from a killed container; clearing it"
     if stale_removal="$(api remove-token 2>/dev/null)"; then
@@ -113,6 +141,49 @@ if [[ -f .runner ]]; then
     fi
     rm -f .runner .credentials .credentials_rsaparams
 fi
+
+# --- reclaim our own name -----------------------------------------------
+#
+# The block above can leave a registration behind on GitHub: the removal is
+# nested inside the remove-token call, so when minting that token fails -- a
+# starved host, a network blip, an expired PAT -- nothing is removed there,
+# yet .runner is deleted locally regardless. config.sh then registers under a
+# name GitHub already knows and fails with "A runner exists with the same
+# name", which `restart: always` turns into a crash loop. #153.
+#
+# Deliberately not --replace, for the reason given where RUNNER_NAME is built:
+# replacing a *live* runner silently is worse than refusing to start. Only an
+# offline runner under our own exact name is reclaimed. That is by definition
+# our own orphan -- names are unique per container, and a container is one
+# runner -- so nobody else's work is cut off. A same-named runner that is
+# online still collides, and we still refuse, exactly as before.
+reclaim_orphaned_name() {
+    local listing id status
+    # per_page=100 covers any plausible pool; a name missing from the first
+    # page just means no reclaim, and config.sh reports the collision as it
+    # does today rather than this masking it.
+    listing="$(api_method GET "?per_page=100" 2>/dev/null)" || {
+        log "could not list runners to check for an orphaned '${RUNNER_NAME}'; continuing" >&2
+        return 0
+    }
+
+    id="$(jq -r --arg n "${RUNNER_NAME}" \
+        '.runners[]? | select(.name == $n) | .id' <<< "${listing}" | head -n1)"
+    [[ -n "${id}" ]] || return 0
+
+    status="$(jq -r --arg n "${RUNNER_NAME}" \
+        '.runners[]? | select(.name == $n) | .status' <<< "${listing}" | head -n1)"
+    if [[ "${status}" != "offline" ]]; then
+        log "a runner named ${RUNNER_NAME} is already ${status} on GitHub; not touching it" >&2
+        return 0
+    fi
+
+    log "reclaiming our own offline registration ${RUNNER_NAME} (id ${id})"
+    api_method DELETE "/${id}" >/dev/null 2>&1 \
+        || log "could not delete the orphaned registration; config.sh will report the collision" >&2
+}
+
+reclaim_orphaned_name
 
 # --- configure ----------------------------------------------------------
 #
