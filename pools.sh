@@ -297,6 +297,15 @@ cmd_up() {
   [[ "$label" == "-" ]] && label=""
   [[ "$mem" == "-" ]] && mem=""
   [[ "$pids" == "-" ]] && pids=""
+  # BUILDX_NO_DEFAULT_ATTESTATIONS so an unchanged build is the same image.
+  # buildx's default provenance attestation records when the build ran, so
+  # every --build -- even one served entirely from cache -- produced a new
+  # image ID, compose saw every running container as out of date, and a
+  # scale-up (or autoscale grow, or a rerun of startRunners.sh) recreated the
+  # whole pool, cancelling its jobs, instead of adding to it. compose.yaml's
+  # `provenance: false` can't do this: compose 5 drops it from the bake
+  # definition it hands buildx.
+  BUILDX_NO_DEFAULT_ATTESTATIONS=1 \
   GITHUB_REPOSITORY="$repo" COMPOSE_PROJECT_NAME="$(project "$name")" \
     RUNNER_EXTRA_LABELS="$label" POOL_MEM_LIMIT="$mem" POOL_PIDS_LIMIT="$pids" \
     docker compose up -d --build --scale "runner=${count}"
